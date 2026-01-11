@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V19 (MOVIE TYP PRO ZOBRAZENÍ) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V20 (SMART HASH SEARCH) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,7 +7,7 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v19";
+const ADDON_NAME = "SubsPlease RD v20";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
@@ -17,15 +17,14 @@ let rssItems = [];
 let metadataCache = new Map(); 
 
 // --- MANIFEST OBJEKT ---
-// ZMĚNA: type 'series' -> 'movie'
 const manifestObj = {
-    id: 'community.subsplease.rd.v19',
-    version: '9.0.0',
+    id: 'community.subsplease.rd.v20',
+    version: '10.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease Addon - Movie Type',
+    description: 'SubsPlease Addon - Hash Search Fix',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
-    types: ['movie'], // Změna na movie pro jednodušší metadata
+    types: ['movie'],
     resources: ['catalog', 'stream', 'meta'],
     catalogs: [{ type: 'movie', id: 'subsplease-feed', name: 'Nejnovější epizody' }],
     behaviorHints: { configurationRequired: false }
@@ -76,6 +75,12 @@ function extractSeriesName(fullTitle) {
     let clean = fullTitle.replace(/\[.*?\]/g, '').trim();
     const parts = clean.split(/\s+-\s+/);
     return parts[0].trim();
+}
+
+// Extrakt Hash z názvu (např. z [2E69DC76] vrátí 2E69DC76)
+function extractHash(fullTitle) {
+    const match = fullTitle.match(/\[([A-F0-9]{8})\]/);
+    return match ? match[1] : null;
 }
 
 // --- ANILIST INTEGRACE ---
@@ -166,13 +171,11 @@ const catalogHandler = async (config) => {
         const magnetLink = match ? match[1] : null;
         const id = `subsplease:${Buffer.from(title).toString('base64')}`;
         const seriesName = extractSeriesName(title);
-        
-        // Placeholder - pro movie typ je to ok
         const poster = `https://ui-avatars.com/api/?name=${encodeURIComponent(seriesName)}&background=6c5ce7&color=fff&size=300&font-size=0.3`;
 
         return {
             id: id,
-            type: 'movie', // ZMĚNA
+            type: 'movie',
             name: title,
             poster: poster,
             background: `https://picsum.photos/seed/bg/${encodeURIComponent(seriesName)}/1200/600`,
@@ -190,22 +193,19 @@ const metaHandler = async (id, extra) => {
         const aniData = await getAniListMeta(originalTitle);
         const seriesName = extractSeriesName(originalTitle);
         
-        // PRO MOVIE TYP nepotřebujeme pole videos, jen jednoduchá data
         const title = aniData?.title?.english || aniData?.title?.romaji || originalTitle;
         const poster = aniData?.coverImage?.extraLarge || aniData?.coverImage?.large || `https://ui-avatars.com/api/?name=${encodeURIComponent(seriesName)}&background=6c5ce7&color=fff&size=300&font-size=0.3`;
         const banner = aniData?.bannerImage || `https://picsum.photos/seed/bg/${encodeURIComponent(seriesName)}/1200/600`;
         const description = aniData?.description ? aniData.description.substring(0, 500) + "..." : `Seriál: ${seriesName}`;
 
-        // Vracíme objekt meta bez "videos" pro typ movie
         return {
             meta: {
                 id: id,
-                type: 'movie', // ZMĚNA
+                type: 'movie',
                 name: title,
                 poster: poster,
                 background: banner,
                 description: description,
-                // genres odstraněny pro zjednodušení
             }
         };
     } catch (error) {
@@ -220,10 +220,28 @@ const streamHandler = async (id, extra) => {
 
     try {
         const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
-        const item = rssItems.find(i => (i.title?.[0] || "") === originalTitle);
+        
+        // POKUS 1: Přesná shoda
+        let item = rssItems.find(i => (i.title?.[0] || "") === originalTitle);
+
+        // POKUS 2: Pokud přesná shoda selhala, hledáme podle HASH kódu
+        // To řeší situaci, kdy se titul v RSS mění, ale hash zůstává stejný (v2, v3 release...)
+        if (!item) {
+            const hash = extractHash(originalTitle);
+            if (hash) {
+                console.log(`Přesná shoda selhala pro: ${originalTitle.substring(0, 30)}...`);
+                console.log(`Zkouším najít podle Hash kódu: [${hash}]`);
+                
+                item = rssItems.find(i => {
+                    const t = i.title?.[0] || "";
+                    // Hledáme položku, která má stejný hash v názvu
+                    return t.includes(`[${hash}]`);
+                });
+            }
+        }
         
         if (!item || !item.description?.[0]) {
-            throw new Error("Epizoda nenalezena v RSS cache.");
+            throw new Error("Epizoda nenalezena v RSS cache (ani přesný název, ani hash).");
         }
         
         const descHtml = item.description[0];
@@ -231,6 +249,8 @@ const streamHandler = async (id, extra) => {
         const magnetLink = match ? match[1] : null;
 
         if (!magnetLink) throw new Error("Magnet nenalezen.");
+        console.log(`Stream nalezen pro: ${item.title[0].substring(0, 30)}...`);
+
         const rdLink = await getRdStreamLink(magnetLink, rdToken);
         return { streams: [{ title: `RD 1080p`, url: rdLink }] };
     } catch (error) {
