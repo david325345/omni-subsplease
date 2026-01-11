@@ -1,4 +1,4 @@
-console.log(">>> SYNTAX CHECK INIT <<<"); // Pokud tento řádek běží, syntax je OK
+console.log(">>> SPAUŠTĚNÍ WEB UI V34 (RD POLLING) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,7 +7,7 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v33.1";
+const ADDON_NAME = "SubsPlease RD v34";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
@@ -20,10 +20,10 @@ let lastRssUpdate = 0;
 
 // --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v33.1',
-    version: '23.0.1',
+    id: 'community.subsplease.rd.v34',
+    version: '24.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease Addon - Clean Copy',
+    description: 'SubsPlease Addon - With RD Polling',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie'],
@@ -57,48 +57,34 @@ const getRdKey = (req) => {
     return config.rd_token || null;
 };
 
-// EXTRAKCE MAGNETU (FINAL FIX - LINK PRIORITY)
+// EXTRAKCE MAGNETU (FIXED)
 function extractMagnet(item) {
     if (!item) return null;
 
-    // 1. PRIORITA: XML tag <link> (Standardní hlavní odkaz)
+    // 1. Priority: <link>
     if (item.link) {
-        // xml2js může vracet link jako string (pro jeden) nebo pole (pro více)
         const linkVal = Array.isArray(item.link) ? item.link[0] : item.link;
-        
         if (linkVal && linkVal.startsWith('magnet:')) return linkVal;
-        
-        // Fallback pro starší parser verze (xml2js mergeAttrs)
-        if (linkVal.$ && linkVal.$.url && linkVal.$.url.startsWith('magnet:')) {
-            return linkVal.$.url;
-        }
     }
 
-    // 2. PRIORITA: XML tag <enclosure>
+    // 2. Priority: <enclosure>
     if (item.enclosure) {
         let enc = item.enclosure;
-        if (Array.isArray(enc)) enc = enc[0]; // Ošetření pole
-
-        // Atributy jsou v $ nebo přímo v objektu
+        if (Array.isArray(enc)) enc = enc[0];
+        
+        // XML2JS Attributes check
         const url = enc.$ ? enc.$.url : enc.url;
         if (url && url.startsWith('magnet:')) return url;
+        if (enc.url && enc.url.startsWith('magnet:')) return enc.url;
     }
 
-    // 3. FALLBACK: Hledání v <description> (Chytrý Regex)
+    // 3. Priority: <description> Regex
     let desc = item.description;
-    // Normalizujeme na string
     if (Array.isArray(desc)) desc = desc[0];
     if (typeof desc !== 'string') desc = "";
-    
-    // Regex: href=" nebo href='
-    const match = desc.match(/href=(["'])(.*?)\1/);
-    if (match && match[2]) {
-        if (match[2].startsWith('magnet:')) return match[2];
-    }
 
-    // 4. FALLBACK: Hledání "magnet:" přímo v textu
-    const directMagnet = desc.match(/(magnet:[^\s<]+)/);
-    if (directMagnet) return directMagnet[1];
+    const match = desc.match(/href=(["'])(.*?)\1/);
+    if (match && match[2] && match[2].startsWith('magnet:')) return match[2];
 
     return null;
 }
@@ -177,38 +163,69 @@ async function getAniListMeta(fullTitle) {
     }
 }
 
-// --- REAL-DEBRID API ---
+// --- REAL-DEBRID API S POLLING (OPRAVENÁ) ---
 async function getRdStreamLink(magnetLink, rdToken) {
     try {
+        // 1. Add Magnet
+        console.log("RD: Přidávám magnet...");
         const addRes = await axios.post('https://api.real-debrid.com/rest/1.0/torrents/addMagnet', 
             `magnet=${encodeURIComponent(magnetLink)}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
         const torrentId = addRes.data.id;
-        const infoRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
-            { headers: { 'Authorization': `Bearer ${rdToken}` } }
-        );
-        let files = infoRes.data.files || [];
-        let fileId = "all";
-        if (files.length > 0) {
-            const videoFiles = files.filter(f => f.path.match(/\.(mp4|mkv|avi)$/i));
-            if (videoFiles.length > 0) {
-                videoFiles.sort((a, b) => b.bytes - a.bytes);
-                fileId = videoFiles[0].id;
+        
+        // 2. Polling Loop
+        let maxAttempts = 15; // 15 * 2s = 30s
+        let filesSelected = false; // Zda jsme už vybrali soubory
+
+        for (let i = 0; i < maxAttempts; i++) {
+            // Čekáme kromě prvního dotazu (nedáváme RD úder každých 100ms)
+            if (i > 0) {
+                await new Promise(r => setTimeout(r, 2000));
+            }
+
+            console.log(`RD: Polling (${i+1}/${maxAttempts})...`);
+            
+            const infoRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
+                { headers: { 'Authorization': `Bearer ${rdToken}` } }
+            );
+            
+            const status = infoRes.data.status;
+            const files = infoRes.data.files || [];
+            
+            if (status === 'magnet_error') throw new Error('RD: Chyba magnetu (mrtvý torrent).');
+            if (status === 'error') throw new Error('RD: Fatal chyba.');
+
+            // 3. File Selection Logic (Pouze jednou, jakmile jsou soubory k dispozici)
+            if (!filesSelected && files.length > 0) {
+                console.log("RD: Soubory k dispozici, vybírám největší video...");
+                let fileId = "all";
+                
+                // Filtr video souborů a seřazení podle velikosti
+                const videoFiles = files.filter(f => f.path.match(/\.(mp4|mkv|avi)$/i));
+                if (videoFiles.length > 0) {
+                    videoFiles.sort((a, b) => b.bytes - a.bytes);
+                    fileId = videoFiles[0].id;
+                }
+                
+                // Vyber soubor
+                await axios.post(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${torrentId}`, 
+                    `files=${fileId}`, 
+                    { headers: { 'Authorization': `Bearer ${rdToken}` } }
+                );
+                
+                filesSelected = true;
+                continue; // Jdeme na další iteraci (počkáme 2s)
+            }
+
+            // 4. Check Links
+            if (infoRes.data.links && infoRes.data.links.length > 0) {
+                console.log("RD: Link je připraven!");
+                return infoRes.data.links[0];
             }
         }
-        await axios.post(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${torrentId}`, 
-            `files=${fileId}`, 
-            { headers: { 'Authorization': `Bearer ${rdToken}` } }
-        );
-        const linksRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
-            { headers: { 'Authorization': `Bearer ${rdToken}` } }
-        );
-        if (linksRes.data.links && linksRes.data.links.length > 0) {
-            return linksRes.data.links[0];
-        } else {
-            throw new Error("Link není připraven.");
-        }
+        
+        throw new Error("RD: Časový limit - Epizoda se nepodařilo stáhnout do 30 sekund.");
     } catch (error) {
         console.error("RD Error:", error.response?.data || error.message);
         throw error;
@@ -236,9 +253,6 @@ const catalogHandler = async (config) => {
         
         if (magnetLink) {
             streamCache.set(id, { magnet: magnetLink, title: title });
-        } else {
-             // DEBUG: Pokud se stále stává, co přesně se děje
-             console.log("EXTRACT FAILED FOR:", title.substring(0, 30));
         }
 
         return {
@@ -250,7 +264,7 @@ const catalogHandler = async (config) => {
             description: `Vydáno: ${new Date(pubDate).toLocaleString()}\nSeriál: ${seriesName}`,
             originalTitle: title
         };
-    }).filter(m => m !== null); // Odstraníme null položky
+    }).filter(m => m !== null);
     
     console.log(`Katalog vrácen: ${metas.length} položek. Cache velikost: ${streamCache.size}`);
     return { metas };
@@ -289,7 +303,7 @@ const streamHandler = async (id, extra) => {
 
     const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
     
-    // 1. STREAM CACHE CHECK
+    // 1. PERSISTENT CACHE CHECK
     const cachedStream = streamCache.get(id);
     if (cachedStream && cachedStream.magnet) {
         console.log(`Stream z CACHE: ${cachedStream.title.substring(0, 30)}...`);
@@ -297,7 +311,7 @@ const streamHandler = async (id, extra) => {
             const rdLink = await getRdStreamLink(cachedStream.magnet, rdToken);
             return { streams: [{ title: `RD 1080p`, url: rdLink }] };
         } catch (e) {
-            console.error("RD Cache Link selhal, zkouším RSS...");
+            console.error("RD Cache Link selhal (timeout?), zkouším RSS...");
         }
     }
 
@@ -323,7 +337,6 @@ const streamHandler = async (id, extra) => {
 
     // 4. LIVE FETCH
     if (!item) {
-        console.log("Item nenalezen, provádím LIVE FETCH...");
         await updateRssCache();
         
         item = rssItems.find(i => {
@@ -331,32 +344,22 @@ const streamHandler = async (id, extra) => {
             const s = originalTitle.trim().normalize('NFC');
             return t === s;
         });
-
-        if (!item) {
-             const hash = extractHash(originalTitle);
-             if (hash) {
-                item = rssItems.find(i => {
-                    const t = (Array.isArray(i.title) ? i.title[0] : i.title || "");
-                    return t.includes(`[${hash}]`);
-                });
-            }
-        }
     }
     
     if (!item) {
-        throw new Error("Epizoda nenalezena v RSS.");
+        throw new Error("Epizoda nenalezena v RSS cache.");
     }
 
+    // FINÁLNÍ EXTRAKCE MAGNETU Z ITEMU (PRO STREAM)
     const magnetLink = extractMagnet(item);
+    if (!magnetLink) throw new Error("Magnet nenalezen v popisku.");
 
-    if (!magnetLink) {
-        throw new Error("Magnet nenalezen.");
-    }
-
+    // Uložení do cache (přepíše, pokud tam byl starý)
     streamCache.set(id, { magnet: magnetLink, title: originalTitle });
 
     console.log(`Stream start: ${originalTitle.substring(0, 30)}...`);
     
+    // ZDE SE ZAVOLÁ POOLING FUNKCE
     const rdLink = await getRdStreamLink(magnetLink, rdToken);
     return { streams: [{ title: `RD 1080p`, url: rdLink }] };
 };
