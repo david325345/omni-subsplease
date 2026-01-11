@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V8 (EXPRESS) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V8.1 (BEZ CONFIG REQUIREMENT) <<<");
 
 const express = require('express');
 const http = require('http');
@@ -140,6 +140,7 @@ const addon = addonBuilder({
     types: ['movie', 'series'],
     resources: ['catalog', 'stream', 'meta'],
     catalogs: [{ type: 'movie', id: 'subsplease-feed', name: 'Nejnovější epizody' }],
+    // POZNÁMKA: Řádek behaviorHints byl odstraněn, aby se Stremio nepokoušelo o grafické nastavení
 });
 
 addon.defineCatalogHandler(catalogHandler);
