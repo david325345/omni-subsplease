@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V32 (BULLETPROOF EXTRACT) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V33 (PRIORITIZOVANÝ LINK) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,7 +7,7 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v32";
+const ADDON_NAME = "SubsPlease RD v33";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
@@ -20,10 +20,10 @@ let lastRssUpdate = 0;
 
 // --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v32',
-    version: '22.0.0',
+    id: 'community.subsplease.rd.v33',
+    version: '23.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease Addon - Bulletproof',
+    description: 'SubsPlease Addon - Link Priority',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie'],
@@ -57,38 +57,37 @@ const getRdKey = (req) => {
     return config.rd_token || null;
 };
 
-// EXTRAKCE MAGNETU (ÚPLNĚ BEZPEČNÁ)
+// EXTRAKCE MAGNETU (FINAL FIX)
 function extractMagnet(item) {
-    if (!item) return null;
-
-    // 1. ENCLOSURE (Priority 1)
-    if (item.enclosure) {
-        let enc = item.enclosure;
-        // Ošetření Array (xml2js vrací enclosure jako pole často)
-        if (Array.isArray(enc)) enc = enc[0];
-
-        // Získání URL
-        if (enc) {
-            // xml2js vrací atributy v $ nebo přímo v objektu podle nastavení
-            const url = enc.$ ? enc.$.url : enc.url;
-            if (url && url.startsWith('magnet:')) return url;
-        }
+    // Priorita 1: XML tag <link> (Hlavní odkaz)
+    // Toto je standardní způsob, jak RSS feedy posílají magnety
+    if (item.link) {
+        // xml2js vrací link jako string nebo array podle verze/parseru
+        const linkVal = Array.isArray(item.link) ? item.link[0] : item.link;
+        if (linkVal && linkVal.startsWith('magnet:')) return linkVal;
     }
 
-    // 2. DESCRIPTION (Priority 2)
+    // Priorita 2: <enclosure> tag
+    if (item.enclosure) {
+        let enc = item.enclosure;
+        if (Array.isArray(enc)) enc = enc[0];
+        // xml2js s mergeAttrs ukládá atributy do $         if (enc.$ && enc.$.url) {
+            if (enc.$.url.startsWith('magnet:')) return enc.$.url;
+        }
+        // Záloha pro starší parser verze (přímý atribut)
+        if (enc.url && enc.url.startsWith('magnet:')) return enc.url;
+    }
+
+    // Priorita 3: <description> (HTML parse)
     let desc = item.description;
-    // Ošetření Array a Undefined
     if (Array.isArray(desc)) desc = desc[0];
-    if (typeof desc !== 'string' || !desc) desc = ""; // Fallback na prázdný string
-
-    // Regex pro href="..." i href='...'
+    if (typeof desc !== 'string') desc = "";
+    
     const match = desc.match(/href=(["'])(.*?)\1/);
-    if (match && match[2] && match[2].startsWith('magnet:')) return match[2];
-
-    // Fallback regex pro "magnet:" kdekoliv v textu
-    const directMagnet = desc.match(/(magnet:[^\s<]+)/);
-    if (directMagnet) return directMagnet[1];
-
+    if (match && match[2]) {
+        if (match[2].startsWith('magnet:')) return match[2];
+    }
+    
     return null;
 }
 
@@ -102,7 +101,7 @@ async function updateRssCache() {
     try {
         console.log("Aktualizuji RSS...");
         const response = await axios.get(SUBSPLEASE_RSS);
-        // Přidán explicitArray: false a mergeAttrs: true pro bezpečný parser
+        // mergeAttrs: true zajistí, že enclosure u atributy zachytí
         const parser = new xml2js.Parser({ trim: true, explicitArray: false, mergeAttrs: true });
         const result = await parser.parseStringPromise(response.data);
         
@@ -208,19 +207,16 @@ async function getRdStreamLink(magnetLink, rdToken) {
 // --- HANDLERS ---
 
 const catalogHandler = async (config) => {
-    // Čekáme na startu
     while (rssItems.length === 0) {
         await new Promise(r => setTimeout(r, 500));
     }
 
     const metas = rssItems.map(item => {
-        // Ošetření title
         const title = Array.isArray(item.title) ? item.title[0] : item.title;
         if (!title) return null;
 
         const pubDate = Array.isArray(item.pubDate) ? item.pubDate[0] : item.pubDate || "";
         
-        // Používáme extractMagnet
         const magnetLink = extractMagnet(item);
         
         const id = `subsplease:${Buffer.from(title).toString('base64')}`;
@@ -229,6 +225,8 @@ const catalogHandler = async (config) => {
         
         if (magnetLink) {
             streamCache.set(id, { magnet: magnetLink, title: title });
+        } else {
+             console.log(`WARNING: Magnet nenalezen pro: ${title.substring(0, 30)}...`);
         }
 
         return {
@@ -240,7 +238,7 @@ const catalogHandler = async (config) => {
             description: `Vydáno: ${new Date(pubDate).toLocaleString()}\nSeriál: ${seriesName}`,
             originalTitle: title
         };
-    }).filter(m => m !== null); // Odstraníme null položky
+    }).filter(m => m !== null);
     
     console.log(`Katalog vrácen: ${metas.length} položek. Cache velikost: ${streamCache.size}`);
     return { metas };
@@ -279,7 +277,8 @@ const streamHandler = async (id, extra) => {
 
     const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
     
-    // 1. STREAM CACHE
+    // 1. PERSISTENT CACHE CHECK
+    let item = null;
     const cachedStream = streamCache.get(id);
     if (cachedStream && cachedStream.magnet) {
         console.log(`Stream z CACHE: ${cachedStream.title.substring(0, 30)}...`);
@@ -294,7 +293,7 @@ const streamHandler = async (id, extra) => {
     // 2. RSS SEARCH
     console.log(`Nenalezeno v cache, hledám v RSS: ${originalTitle.substring(0, 30)}...`);
     
-    let item = rssItems.find(i => {
+    item = rssItems.find(i => {
         const t = (Array.isArray(i.title) ? i.title[0] : i.title || "").trim().normalize('NFC');
         const s = originalTitle.trim().normalize('NFC');
         return t === s;
@@ -304,40 +303,39 @@ const streamHandler = async (id, extra) => {
     if (!item) {
         await updateRssCache();
         
-        // Zkusíme znovu přesně
         item = rssItems.find(i => {
             const t = (Array.isArray(i.title) ? i.title[0] : i.title || "").trim().normalize('NFC');
             const s = originalTitle.trim().normalize('NFC');
             return t === s;
         });
 
-        // Hash fallback
         if (!item) {
             const hash = extractHash(originalTitle);
             if (hash) {
                 item = rssItems.find(i => {
-                    const t = Array.isArray(i.title) ? i.title[0] : i.title || "";
+                    const t = (Array.isArray(i.title) ? i.title[0] : i.title || "");
                     return t.includes(`[${hash}]`);
                 });
             }
         }
     }
-    
+
     if (!item) {
-        throw new Error("Epizoda nenalezena v RSS.");
+        throw new Error("Epizoda nenalezena v RSS (je příliš stará).");
     }
 
-    // Použití extractMagnet i zde
+    // FINÁLNÍ EXTRAKCE MAGNETU (S ITEM.LINK)
     const magnetLink = extractMagnet(item);
 
     if (!magnetLink) {
-        console.error("Magnet nenalezen v itemu:", item);
-        throw new Error("Magnet nenalezen.");
+        throw new Error("Magnet nenalezen ani v item.link ani v description.");
     }
 
-    console.log(`Stream start: ${originalTitle.substring(0, 30)}...`);
+    // Aktualizace cache
     streamCache.set(id, { magnet: magnetLink, title: originalTitle });
 
+    console.log(`Stream start: ${originalTitle.substring(0, 30)}...`);
+    
     const rdLink = await getRdStreamLink(magnetLink, rdToken);
     return { streams: [{ title: `RD 1080p`, url: rdLink }] };
 };
