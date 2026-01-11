@@ -1,13 +1,16 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V35 (INCREASED TIMEOUT) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V36 (STEMIO READY) <<<");
 
 const express = require('express');
 const axios = require('axios');
 const xml2js = require('xml2js');
 
+// AXIOS DEFAULTS - Zabrání zamotání
+axios.defaults.timeout = 10000; // 10s timeout pro všechny externí dotazy
+
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v35";
+const ADDON_NAME = "SubsPlease RD v36";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
@@ -20,10 +23,10 @@ let lastRssUpdate = 0;
 
 // --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v35',
-    version: '25.0.0',
+    id: 'community.subsplease.rd.v36',
+    version: '26.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease Addon - 120s Timeout',
+    description: 'SubsPlease Addon - 20s Timeout',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie'],
@@ -57,7 +60,7 @@ const getRdKey = (req) => {
     return config.rd_token || null;
 };
 
-// EXTRAKCE MAGNETU (V33 FIX)
+// EXTRAKCE MAGNETU (V33 FIXED)
 function extractMagnet(item) {
     if (!item) return null;
 
@@ -82,9 +85,7 @@ function extractMagnet(item) {
     if (typeof desc !== 'string') desc = "";
     
     const match = desc.match(/href=(["'])(.*?)\1/);
-    if (match && match[2]) {
-        if (match[2].startsWith('magnet:')) return match[2];
-    }
+    if (match && match[2] && match[2].startsWith('magnet:')) return match[2];
 
     const directMagnet = desc.match(/(magnet:[^\s<]+)/);
     if (directMagnet) return directMagnet[1];
@@ -95,13 +96,12 @@ function extractMagnet(item) {
 // Aktualizace RSS
 async function updateRssCache() {
     const now = Date.now();
-    if (now - lastRssUpdate < 10 * 1000) {
-        return;
-    }
+    if (now - lastRssUpdate < 10 * 1000) return;
     
     try {
         console.log("Aktualizuji RSS...");
-        const response = await axios.get(SUBSPLEASE_RSS);
+        // Používáme stejný timeout, aby se to nezaseklo
+        const response = await axios.get(SUBSPLEASE_RSS, { timeout: 10000 }); 
         const parser = new xml2js.Parser({ trim: true, explicitArray: false, mergeAttrs: true });
         const result = await parser.parseStringPromise(response.data);
         
@@ -114,6 +114,7 @@ async function updateRssCache() {
         console.log(`RSS Cache aktualizována. Načteno ${rssItems.length} položek.`);
     } catch (error) {
         console.error("Chyba aktualizace RSS Cache:", error.message);
+        // Pokud se nepodaří načíst RSS, zůstaneme u starých dat
     }
 }
 
@@ -151,7 +152,8 @@ async function getAniListMeta(fullTitle) {
             query,
             variables: { search: seriesName }
         }, {
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            timeout: 10000 // 10s timeout
         });
         const media = response.data?.data?.Media;
         if (media) {
@@ -166,71 +168,69 @@ async function getAniListMeta(fullTitle) {
     }
 }
 
-// --- REAL-DEBRID API (OPRAVENÝ POLLING 60s) ---
+// --- REAL-DEBRID API (NO POLLING - FAST FAIL) ---
 async function getRdStreamLink(magnetLink, rdToken) {
     try {
-        // 1. Add Magnet
+        // 1. ADD MAGNET
         console.log("RD: Přidávám magnet...");
         const addRes = await axios.post('https://api.real-debrid.com/rest/1.0/torrents/addMagnet', 
             `magnet=${encodeURIComponent(magnetLink)}`, 
-            { headers: { 'Authorization': `Bearer ${rdToken}` } }
+            { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 15000 } // 15s timeout
         );
         const torrentId = addRes.data.id;
         
-        // 2. Polling Loop (60 attempts = 120 seconds)
-        let maxAttempts = 60; // ZVYŠENO Z 15 NA 60
-        let filesSelected = false;
+        // 2. INFO (JEDNÝ DOTAZ - NO POLLING)
+        // Stremio toleruje chvíli čekání (např 5-10s), ale ne zaseknutí.
+        // Pokud RD nestíhá do 20s, vyhodíme chybu "RD je zaneprázdný".
+        console.log("RD: Získávám info...");
+        const infoRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
+            { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 25000 } // 25s timeout
+        );
+        
+        const status = infoRes.data.status;
+        const files = infoRes.data.files || [];
 
-        for (let i = 0; i < maxAttempts; i++) {
-            // Neposílam dotaz každou 100ms, ale každé 2s (aby se RD nezahltal)
-            if (i > 0) {
-                await new Promise(r => setTimeout(r, 2000));
-            }
+        // CHYBOVÉ STAVY
+        if (status === 'magnet_error') throw new Error('RD: Torrent je neplatný nebo byl smazán.');
+        if (status === 'error') throw new Error('RD: Interní chyba serveru.');
+        if (status === 'waiting_files_selection' && files.length === 0) {
+             // Čekáme na soubory, ale nejsou tam.
+             throw new Error('RD: Soubory se připravují. Zkuste znovu za 20 sekund.');
+        }
+        if (status === 'downloading') {
+            throw new Error('RD: Epizoda se stahuje (nedokončeno). Zkuste znovu za chvíli.');
+        }
 
-            console.log(`RD: Polling (${i+1}/${maxAttempts})...`);
-            
-            const infoRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
-                { headers: { 'Authorization': `Bearer ${rdToken}` } }
-            );
-            
-            const status = infoRes.data.status;
-            const files = infoRes.data.files || [];
-            
-            if (status === 'magnet_error') throw new Error('RD: Chyba magnetu (mrtvý torrent).');
-            if (status === 'error') throw new Error('RD: Fatal chyba.');
-
-            // 3. File Selection (jen jednou)
-            if (!filesSelected && files.length > 0) {
-                console.log("RD: Soubory k dispozici, vybírám největší video...");
-                let fileId = "all";
-                
-                const videoFiles = files.filter(f => f.path.match(/\.(mp4|mkv|avi)$/i));
-                if (videoFiles.length > 0) {
-                    videoFiles.sort((a, b) => b.bytes - a.bytes);
-                    fileId = videoFiles[0].id;
-                }
-                
-                // Vybereme soubor
-                await axios.post(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${torrentId}`, 
-                    `files=${fileId}`, 
-                    { headers: { 'Authorization': `Bearer ${rdToken}` } }
-                );
-                
-                filesSelected = true;
-                // Nastavíme i=0, aby počkali další čekací cyklus (konzistentní se standardním chováním)
-                continue; 
-            }
-
-            // 4. Check Links
-            if (infoRes.data.links && infoRes.data.links.length > 0) {
-                console.log("RD: Link je připraven!");
-                return infoRes.data.links[0];
+        // 3. FILE SELECTION (Jen jednou)
+        let fileId = "all";
+        if (files.length > 0) {
+            const videoFiles = files.filter(f => f.path.match(/\.(mp4|mkv|avi)$/i));
+            if (videoFiles.length > 0) {
+                videoFiles.sort((a, b) => b.bytes - a.bytes);
+                fileId = videoFiles[0].id;
             }
         }
         
-        throw new Error("RD: Časový limit - Epizoda se nepodařilo stáhnout do 120 sekund (pravděpodobně velmi velký soubor nebo přetížení RD).");
+        await axios.post(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${torrentId}`, 
+            `files=${fileId}`, 
+            { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 10000 }
+        );
+        
+        // 4. LINKS (JEDNÝ DOTAZ)
+        console.log("RD: Získávám linky...");
+        const linksRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
+            { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 25000 }
+        );
+
+        if (linksRes.data.links && linksRes.data.links.length > 0) {
+            return linksRes.data.links[0];
+        } else {
+            // Pokud je status 'processing' nebo 'queued', ale linků není, hodíme chybu
+            // Nebudeme čekat 2 minuty (v35), protože to rozbije Stremio UX.
+            throw new Error("RD: Server je vytížený. Zkuste znovu za 1-2 minuty.");
+        }
     } catch (error) {
-        console.error("RD Error:", error.response?.data || error.message);
+        console.error("RD Error:", error.message);
         throw error;
     }
 }
@@ -247,7 +247,6 @@ const catalogHandler = async (config) => {
         if (!title) return null;
 
         const pubDate = Array.isArray(item.pubDate) ? item.pubDate[0] : item.pubDate || "";
-        
         const magnetLink = extractMagnet(item);
         
         const id = `subsplease:${Buffer.from(title).toString('base64')}`;
@@ -269,7 +268,7 @@ const catalogHandler = async (config) => {
         };
     }).filter(m => m !== null);
     
-    console.log(`Katalog vrácen: ${metas.length} položek. Cache velikost: ${streamCache.size}`);
+    console.log(`Katalog vrácen: ${metas.length} položek.`);
     return { metas };
 };
 
@@ -306,7 +305,7 @@ const streamHandler = async (id, extra) => {
 
     const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
     
-    // 1. PERSISTENT CACHE CHECK
+    // 1. STREAM CACHE CHECK
     const cachedStream = streamCache.get(id);
     if (cachedStream && cachedStream.magnet) {
         console.log(`Stream z CACHE: ${cachedStream.title.substring(0, 30)}...`);
@@ -327,7 +326,18 @@ const streamHandler = async (id, extra) => {
         return t === s;
     });
 
-    // 3. LIVE FETCH + HASH
+    // 3. HASH SEARCH
+    if (!item) {
+        const hash = extractHash(originalTitle);
+        if (hash) {
+            item = rssItems.find(i => {
+                const t = (Array.isArray(i.title) ? i.title[0] : i.title || "");
+                return t.includes(`[${hash}]`);
+            });
+        }
+    }
+
+    // 4. LIVE FETCH
     if (!item) {
         await updateRssCache();
         
@@ -338,8 +348,8 @@ const streamHandler = async (id, extra) => {
         });
 
         if (!item) {
-            const hash = extractHash(originalTitle);
-            if (hash) {
+             const hash = extractHash(originalTitle);
+             if (hash) {
                 item = rssItems.find(i => {
                     const t = (Array.isArray(i.title) ? i.title[0] : i.title || "");
                     return t.includes(`[${hash}]`);
@@ -347,26 +357,33 @@ const streamHandler = async (id, extra) => {
             }
         }
     }
-
+    
     if (!item) {
         throw new Error("Epizoda nenalezena v RSS.");
     }
 
-    // FINÁLNÍ EXTRAKCE MAGNETU Z ITEMU
     const magnetLink = extractMagnet(item);
 
     if (!magnetLink) {
         throw new Error("Magnet nenalezen.");
     }
 
-    // Aktualizujeme cache
-    streamCache.set(id, { magnet: magnetLink, title: originalTitle });
+    // NEUKLÁDÁME DO CACHE PRO STREAM, pokud je nový
+    // Pokud selhali na cache, chceme uložit novou cestu
+    if (!cachedStream) {
+        streamCache.set(id, { magnet: magnetLink, title: originalTitle });
+    }
 
     console.log(`Stream start: ${originalTitle.substring(0, 30)}...`);
     
-    // ZDE SE ZAVOLÁ GETRDSTREAMLINK S 120s TIMEMOUT
-    const rdLink = await getRdStreamLink(magnetLink, rdToken);
-    return { streams: [{ title: `RD 1080p`, url: rdLink }] };
+    try {
+        const rdLink = await getRdStreamLink(magnetLink, rdToken);
+        return { streams: [{ title: `RD 1080p`, url: rdLink }] };
+    } catch (error) {
+        // Pokud RD selhal, vyhodíme chybu, aby Stremio vědělo, že stream není dostupný
+        console.error("Final Stream Error:", error.message);
+        throw error;
+    }
 };
 
 // --- ROUTING ---
@@ -414,6 +431,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
         res.json(data);
     } catch (error) {
         console.error(error);
+        // Pokud dojde k chybě (např. timeout), vrátíme chybu 500. Stremio to zobrazí jako chybu, ne jako spinner.
         res.status(500).json({ error: error.message });
     }
 });
