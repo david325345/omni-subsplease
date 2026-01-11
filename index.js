@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V20 (SMART HASH SEARCH) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V21 (LIVE REFRESH FIX) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,7 +7,7 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v20";
+const ADDON_NAME = "SubsPlease RD v21";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
@@ -18,10 +18,10 @@ let metadataCache = new Map();
 
 // --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v20',
-    version: '10.0.0',
+    id: 'community.subsplease.rd.v21',
+    version: '11.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease Addon - Hash Search Fix',
+    description: 'SubsPlease Addon - Live Refresh',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie'],
@@ -55,7 +55,7 @@ const getRdKey = (req) => {
     return config.rd_token || null;
 };
 
-// Aktualizace RSS
+// Aktualizace RSS (Volá se na pozadí)
 async function updateRssCache() {
     try {
         const response = await axios.get(SUBSPLEASE_RSS);
@@ -77,7 +77,7 @@ function extractSeriesName(fullTitle) {
     return parts[0].trim();
 }
 
-// Extrakt Hash z názvu (např. z [2E69DC76] vrátí 2E69DC76)
+// Extrakt Hash
 function extractHash(fullTitle) {
     const match = fullTitle.match(/\[([A-F0-9]{8})\]/);
     return match ? match[1] : null;
@@ -162,7 +162,6 @@ async function getRdStreamLink(magnetLink, rdToken) {
 
 const catalogHandler = async (config) => {
     if (rssItems.length === 0) await new Promise(r => setTimeout(r, 1000));
-
     const metas = rssItems.map(item => {
         const title = item.title?.[0] || "Unknown";
         const pubDate = item.pubDate?.[0] || "";
@@ -172,7 +171,6 @@ const catalogHandler = async (config) => {
         const id = `subsplease:${Buffer.from(title).toString('base64')}`;
         const seriesName = extractSeriesName(title);
         const poster = `https://ui-avatars.com/api/?name=${encodeURIComponent(seriesName)}&background=6c5ce7&color=fff&size=300&font-size=0.3`;
-
         return {
             id: id,
             type: 'movie',
@@ -221,27 +219,40 @@ const streamHandler = async (id, extra) => {
     try {
         const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
         
-        // POKUS 1: Přesná shoda
+        // POKUS 1: Hledáme v aktuální cache
         let item = rssItems.find(i => (i.title?.[0] || "") === originalTitle);
 
-        // POKUS 2: Pokud přesná shoda selhala, hledáme podle HASH kódu
-        // To řeší situaci, kdy se titul v RSS mění, ale hash zůstává stejný (v2, v3 release...)
+        // POKUS 2: Pokud nenalezen, načítáme FRESH RSS a zkoušíme znovu
+        // Toto řeší situaci, kdy se katalog v Stremiu "stáhl" dříve než server stihl aktualizovat cache
         if (!item) {
-            const hash = extractHash(originalTitle);
-            if (hash) {
-                console.log(`Přesná shoda selhala pro: ${originalTitle.substring(0, 30)}...`);
-                console.log(`Zkouším najít podle Hash kódu: [${hash}]`);
-                
-                item = rssItems.find(i => {
-                    const t = i.title?.[0] || "";
-                    // Hledáme položku, která má stejný hash v názvu
-                    return t.includes(`[${hash}]`);
-                });
+            console.log(`Epizoda nenalezena v cache: ${originalTitle.substring(0, 30)}...`);
+            console.log("Provádím LIVE REFRESH RSS...");
+            
+            // Zastavíme interval, aby se nenaplácal s novým fetchem
+            clearInterval(updateRssCache);
+            await updateRssCache(); // OKAMŽITÝ FETCH
+            setInterval(updateRssCache, 5 * 60 * 1000); // Spustíme znovu
+
+            // Zkusíme najít znovu v nově načteném RSS
+            item = rssItems.find(i => (i.title?.[0] || "") === originalTitle);
+            
+            if (item) {
+                console.log("Epizoda nalezena po Live Refresh.");
+            } else {
+                // POKUS 3: Pokud stále nic, zkusíme HASH search
+                const hash = extractHash(originalTitle);
+                if (hash) {
+                    console.log(`Presná shoda selhala. Zkouším HASH [${hash}]...`);
+                    item = rssItems.find(i => {
+                        const t = i.title?.[0] || "";
+                        return t.includes(`[${hash}]`);
+                    });
+                }
             }
         }
         
         if (!item || !item.description?.[0]) {
-            throw new Error("Epizoda nenalezena v RSS cache (ani přesný název, ani hash).");
+            throw new Error("Epizoda nenalezena ani po Live Refresh (je pravděpodobně velmi stará).");
         }
         
         const descHtml = item.description[0];
@@ -249,7 +260,7 @@ const streamHandler = async (id, extra) => {
         const magnetLink = match ? match[1] : null;
 
         if (!magnetLink) throw new Error("Magnet nenalezen.");
-        console.log(`Stream nalezen pro: ${item.title[0].substring(0, 30)}...`);
+        console.log(`Stream připraven: ${item.title[0].substring(0, 30)}...`);
 
         const rdLink = await getRdStreamLink(magnetLink, rdToken);
         return { streams: [{ title: `RD 1080p`, url: rdLink }] };
