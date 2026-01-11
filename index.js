@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V13 (ANILIST METADATA) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V14 (LAZY METADATA - FIX 429) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,29 +7,26 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v13";
+const ADDON_NAME = "SubsPlease RD v14";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
 
-// Cache pro metadata, abychom nezahltili API
+// Cache pro metadata (zůstává, využívá se v Meta handleru)
 const metadataCache = new Map();
 
 // --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v13',
-    version: '4.0.0',
+    id: 'community.subsplease.rd.v14',
+    version: '4.0.1',
     name: ADDON_NAME,
-    description: 'SubsPlease + Real-Debrid Addon s AniList metadaty',
+    description: 'SubsPlease + Real-Debrid Addon s Lazy Metadaty',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
-    types: ['series', 'movie'], // Přidány types
+    types: ['series'],
     resources: ['catalog', 'stream', 'meta'],
     catalogs: [{ type: 'series', id: 'subsplease-feed', name: 'Nejnovější epizody' }],
-    behaviorHints: {
-        // Nastavení pro lepší zobrazení v seznamu
-        configurable: false
-    }
+    behaviorHints: { configurable: false }
 };
 
 // --- MIDDLEWARE ---
@@ -59,14 +56,13 @@ const getRdKey = (req) => {
 
 // --- ANILIST INTEGRACE ---
 async function getAniListMeta(title) {
-    // Pokud už máme data v cache, vrátíme je
     if (metadataCache.has(title)) {
         return metadataCache.get(title);
     }
 
     try {
-        // Příprava GraphQL dotazu
-        // Hledáme anime podle názvu (AniList fuzzy search umí zpracovat "One Piece 1093")
+        // Odstraníme číslo epizody z názvu pro lepší vyhledávání (např. "One Piece 1093" -> "One Piece")
+        // Ale AniList search zvládne i to s číslem, takže to necháme být pro jednoduchost.
         const query = `
             query ($search: String) {
               Media(search: $search, type: ANIME) {
@@ -100,7 +96,11 @@ async function getAniListMeta(title) {
         }
         return null;
     } catch (error) {
-        console.error("AniList API Error:", error.response?.status, error.response?.statusText);
+        if (error.response?.status === 429) {
+            console.error("AniList Rate Limit reached");
+        } else {
+            console.error("AniList API Error:", error.message);
+        }
         return null;
     }
 }
@@ -113,6 +113,7 @@ async function getRdStreamLink(magnetLink, rdToken) {
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
         const torrentId = addRes.data.id;
+        
         const infoRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
@@ -125,10 +126,12 @@ async function getRdStreamLink(magnetLink, rdToken) {
                 fileId = videoFiles[0].id;
             }
         }
+        
         await axios.post(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${torrentId}`, 
             `files=${fileId}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
+        
         const linksRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
@@ -146,6 +149,7 @@ async function getRdStreamLink(magnetLink, rdToken) {
 
 // --- HANDLERS ---
 
+// 1. CATALOG HANDLER (RYCHLÝ, BEZ ANILIST CALLS)
 const catalogHandler = async (config) => {
     try {
         const response = await axios.get(SUBSPLEASE_RSS);
@@ -153,36 +157,29 @@ const catalogHandler = async (config) => {
         const result = await parser.parseStringPromise(response.data);
         const items = result.rss?.channel?.[0]?.item || [];
         
-        // Mapování položek s načítáním metadat
-        const metas = await Promise.all(items.map(async (item) => {
+        const metas = items.map(item => {
             const title = item.title?.[0] || "Unknown";
             const pubDate = item.pubDate?.[0] || "";
             const descHtml = item.description?.[0] || "";
             const match = descHtml.match(/href="([^"]+)"/);
             const magnetLink = match ? match[1] : null;
-            
-            // Generování ID (stejné jako předtím pro kompatibilitu streamů)
             const id = `subsplease:${Buffer.from(title).toString('base64').substring(0, 20)}`;
 
-            // Získání metadat z AniList
-            const aniData = await getAniListMeta(title);
+            // Generujeme jednotný placeholder obrázek, který vypadá dobře
+            // Používáme seed podle názvu, aby byl obrázek stálý pro stejný seriál
+            const poster = `https://ui-avatars.com/api/?name=${encodeURIComponent(title)}&background=6c5ce7&color=fff&size=300&font-size=0.3`;
 
-            // Vrácení meta objektu se sloučením dat
             return {
                 id: id,
-                type: 'series', // Změna z movie na series pro lepší metadata
-                name: aniData ? (aniData.title.english || aniData.title.romaji) : title,
-                poster: aniData ? aniData.coverImage.extraLarge : `https://picsum.photos/seed/${encodeURIComponent(title)}/200/300`,
-                background: aniData ? aniData.bannerImage : `https://picsum.photos/seed/bg/${encodeURIComponent(title)}/1200/600`,
-                description: aniData 
-                    ? aniData.description.replace(/<[^>]*>/g, '').substring(0, 500) + "..." 
-                    : `Vydáno: ${new Date(pubDate).toLocaleString()} (SubsPlease)`,
-                genres: aniData ? aniData.genres : ['Anime'],
-                // Uložíme magnet do custom vlastnosti pro stream handler
+                type: 'series',
+                name: title,
+                poster: poster, // Placeholder
+                background: `https://picsum.photos/seed/bg/${encodeURIComponent(title)}/1200/600`,
+                description: `Vydáno: ${new Date(pubDate).toLocaleString()}\nKlikni pro detaily z AniList.`,
                 subsplease_magnet: magnetLink,
                 originalTitle: title
             };
-        }));
+        });
         return { metas };
     } catch (error) {
         console.error("RSS Error:", error.message);
@@ -190,32 +187,24 @@ const catalogHandler = async (config) => {
     }
 };
 
+// 2. META HANDLER (ZDE NAČÍTÁME ANILIST)
 const metaHandler = async (id, extra) => {
     const decodedTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
     
     try {
-        // Zkusíme znovu najít v RSS kvůli magnetu, ale hlavní informace vezmeme z AniList
-        const response = await axios.get(SUBSPLEASE_RSS);
-        const parser = new xml2js.Parser();
-        const result = await parser.parseStringPromise(response.data);
-        const items = result.rss?.channel?.[0]?.item || [];
-        
-        const item = items.find(i => (i.title?.[0] || "").startsWith(decodedTitle.substring(0, 15)));
-        if (!item) throw new Error("Item nenalezen.");
+        // Získání dat z AniList (na kliknutí)
+        const aniData = await getAniListMeta(decodedTitle);
 
-        const title = item.title[0];
-        const aniData = await getAniListMeta(title);
-
-        return { 
+        return {
             meta: {
                 id: id,
                 type: 'series',
-                name: aniData ? (aniData.title.english || aniData.title.romaji) : title,
+                name: aniData ? (aniData.title.english || aniData.title.romaji) : decodedTitle,
                 poster: aniData ? aniData.coverImage.extraLarge : '',
                 background: aniData ? aniData.bannerImage : '',
-                description: aniData ? aniData.description : '',
-                genres: aniData ? aniData.genres : [],
-                videos: aniData ? [{ title: title, released: new Date().toISOString() }] : []
+                description: aniData ? aniData.description.replace(/<[^>]*>/g, '').substring(0, 500) + "..." : '',
+                genres: aniData ? aniData.genres : ['Anime'],
+                videos: aniData ? [{ title: decodedTitle, released: new Date().toISOString() }] : []
             }
         };
     } catch (error) {
@@ -224,6 +213,7 @@ const metaHandler = async (id, extra) => {
     }
 };
 
+// 3. STREAM HANDLER
 const streamHandler = async (id, extra) => {
     const rdToken = extra.rd_token;
     if (!rdToken) throw new Error("Chybí RD token.");
@@ -235,9 +225,13 @@ const streamHandler = async (id, extra) => {
         const items = result.rss?.channel?.[0]?.item || [];
         
         const decodedTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
+        
+        // Hledáme položku - matchujeme začátek názvu
+        // Poznámka: Pokud epizoda zmizela z RSS (je stará), zde nalezne chybu.
         const item = items.find(i => (i.title?.[0] || "").startsWith(decodedTitle.substring(0, 15)));
         
-        if (!item || !item.description?.[0]) throw new Error("Item nenalezen.");
+        if (!item || !item.description?.[0]) throw new Error("Epizoda nenalezena v RSS feedu (je stará nebo se nenačetla).");
+        
         const descHtml = item.description[0];
         const match = descHtml.match(/href="([^"]+)"/);
         const magnetLink = match ? match[1] : null;
@@ -247,7 +241,7 @@ const streamHandler = async (id, extra) => {
         const rdLink = await getRdStreamLink(magnetLink, rdToken);
         return { streams: [{ title: `RD 1080p`, url: rdLink }] };
     } catch (error) {
-        console.error(error);
+        console.error("Stream Error:", error.message);
         throw error;
     }
 };
@@ -308,5 +302,4 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Server běží na portu: ${PORT}`);
-    console.log(`Manifest: http://localhost:${PORT}/manifest.json`);
 });
