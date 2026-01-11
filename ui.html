@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SubsPlease RD Addon</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #0f111a;
+            color: #ffffff;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        .container {
+            background: #1a1d29;
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+            text-align: center;
+            max-width: 400px;
+            width: 90%;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        h1 { margin-bottom: 1.5rem; color: #6c5ce7; }
+        label { display: block; text-align: left; margin-bottom: 0.5rem; font-size: 0.9rem; color: #a0a0a0; }
+        input[type="text"], input[type="password"] {
+            width: 100%;
+            padding: 12px;
+            margin-bottom: 1rem;
+            background: #000;
+            border: 1px solid #333;
+            color: white;
+            border-radius: 6px;
+            box-sizing: border-box;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background-color: #6c5ce7;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        button:hover { background-color: #5649c0; }
+        .result {
+            margin-top: 1.5rem;
+            padding: 10px;
+            background: #2d3436;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 0.8rem;
+            word-break: break-all;
+            display: none;
+        }
+        .copy-btn {
+            margin-top: 10px;
+            background-color: #00b894;
+            display: none;
+        }
+        .copy-btn:hover { background-color: #00a383; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 SubsPlease RD</h1>
+        <p style="color: #a0a0a0; font-size: 0.9rem; margin-bottom: 20px;">
+            Vložte svůj Real-Debrid API token pro vygenerování instalačního odkazu.
+        </p>
+        
+        <label for="rd-token">Real-Debrid API Token</label>
+        <input type="password" id="rd-token" placeholder="např. YJH78..." autocomplete="off">
+        
+        <button onclick="generateLink()">Vygenerovat Instalační Odkaz</button>
+        
+        <div id="result-area" class="result"></div>
+        <button id="copy-btn" class="copy-btn" onclick="copyLink()">Zkopírovat Odkaz</button>
+    </div>
+
+    <script>
+        function generateLink() {
+            const token = document.getElementById('rd-token').value.trim();
+            if (!token) {
+                alert("Prosím zadejte token.");
+                return;
+            }
+            
+            const baseUrl = window.location.origin;
+            const manifestUrl = `${baseUrl}/manifest.json?token=${token}`;
+            
+            const resultDiv = document.getElementById('result-area');
+            resultDiv.innerText = manifestUrl;
+            resultDiv.style.display = 'block';
+            
+            const copyBtn = document.getElementById('copy-btn');
+            copyBtn.style.display = 'inline-block';
+        }
+
+        function copyLink() {
+            const text = document.getElementById('result-area').innerText;
+            navigator.clipboard.writeText(text).then(() => {
+                const btn = document.getElementById('copy-btn');
+                const originalText = btn.innerText;
+                btn.innerText = "Zkopírováno!";
+                setTimeout(() => btn.innerText = originalText, 2000);
+            });
+        }
+    </script>
+</body>
+</html>

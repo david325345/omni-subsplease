@@ -1,22 +1,37 @@
-console.log(">>> ZAHÁJENÍ V7 (PŘÍMÝ SERVER - BEZ SERVEHTTP) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V8 (EXPRESS) <<<");
 
+const express = require('express');
+const http = require('http');
 const sdk = require('stremio-addon-sdk');
 const addonBuilder = sdk.addonBuilder;
-const getRouter = sdk.getRouter; // Použijeme router místo serveHTTP
+const getRouter = sdk.getRouter;
 
-const http = require('http'); // Vložíme standardní Node.js http knihovnu
 const axios = require('axios');
 const xml2js = require('xml2js');
 
+const app = express();
+
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v7";
+const ADDON_NAME = "SubsPlease RD v8";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 
-// Získání klíče
+// --- MIDDLEWARE ---
+app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') {
+        return res.writeHead(204).end();
+    }
+    next();
+});
+
+// --- LOGIKA GET API KEY ---
 const getRdKey = (args) => {
-    if (args.config && args.config.rd_token) return args.config.rd_token;
+    // Priorita: 1. URL parametr (?token=...), 2. Config (pokud by existoval)
     if (args.extra && args.extra.token) return args.extra.token;
+    if (args.config && args.config.rd_token) return args.config.rd_token;
     return null;
 };
 
@@ -28,7 +43,6 @@ async function getRdStreamLink(magnetLink, rdToken) {
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
         const torrentId = addRes.data.id;
-        
         const infoRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
@@ -41,12 +55,10 @@ async function getRdStreamLink(magnetLink, rdToken) {
                 fileId = videoFiles[0].id;
             }
         }
-        
         await axios.post(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${torrentId}`, 
             `files=${fileId}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
-        
         const linksRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
@@ -63,14 +75,12 @@ async function getRdStreamLink(magnetLink, rdToken) {
 }
 
 // --- HANDLERS ---
-
 const catalogHandler = async ({ config }) => {
     try {
         const response = await axios.get(SUBSPLEASE_RSS);
         const parser = new xml2js.Parser();
         const result = await parser.parseStringPromise(response.data);
         const items = result.rss?.channel?.[0]?.item || [];
-        
         const metas = items.map(item => {
             const title = item.title?.[0] || "Unknown";
             const pubDate = item.pubDate?.[0] || "";
@@ -78,7 +88,6 @@ const catalogHandler = async ({ config }) => {
             const match = descHtml.match(/href="([^"]+)"/);
             const magnetLink = match ? match[1] : null;
             const id = `subsplease:${Buffer.from(title).toString('base64').substring(0, 20)}`;
-
             return {
                 id: id,
                 type: 'movie',
@@ -104,18 +113,14 @@ const streamHandler = async (args) => {
         const parser = new xml2js.Parser();
         const result = await parser.parseStringPromise(response.data);
         const items = result.rss?.channel?.[0]?.item || [];
-        
         const base64Title = args.id.replace('subsplease:', '');
         const decodedTitle = Buffer.from(base64Title, 'base64').toString('utf-8');
         const item = items.find(i => (i.title?.[0] || "").startsWith(decodedTitle.substring(0, 15)));
-        
         if (!item || !item.description?.[0]) throw new Error("Item nenalezen.");
         const descHtml = item.description[0];
         const match = descHtml.match(/href="([^"]+)"/);
         const magnetLink = match ? match[1] : null;
-
         if (!magnetLink) throw new Error("Magnet nenalezen.");
-
         const rdLink = await getRdStreamLink(magnetLink, rdToken);
         return { streams: [{ title: `RD 1080p`, url: rdLink }] };
     } catch (error) {
@@ -124,12 +129,12 @@ const streamHandler = async (args) => {
     }
 };
 
-// --- VYTVOŘENÍ ADDONU ---
+// --- ADDON BUILDER ---
 const addon = addonBuilder({
-    id: 'community.subsplease.rd.v7',
-    version: '1.7.0',
+    id: 'community.subsplease.rd.v8',
+    version: '2.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease + Real-Debrid Addon v7',
+    description: 'SubsPlease + Real-Debrid Addon v8',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie', 'series'],
@@ -137,35 +142,21 @@ const addon = addonBuilder({
     catalogs: [{ type: 'movie', id: 'subsplease-feed', name: 'Nejnovější epizody' }],
 });
 
-// --- PŘIPOJENÍ HANDLERŮ ---
 addon.defineCatalogHandler(catalogHandler);
 addon.defineStreamHandler(streamHandler);
 
-// --- START SERVER (PŘÍMÁ METODA) ---
-// Vytvoříme router z addonu
-const addonRouter = getRouter(addon);
-
-const PORT = process.env.PORT || 3000;
-const server = http.createServer((req, res) => {
-    // Přidáme CORS hlavičky pro větší spolehlivost
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-    if (req.method === 'OPTIONS') {
-        res.writeHead(204);
-        res.end();
-        return;
-    }
-
-    // Předejeme požadavek do routeru addonu
-    addonRouter(req, res, () => {
-        res.writeHead(404);
-        res.end('Not Found');
-    });
+// --- ROUTING ---
+// 1. Webové UI na domovské stránce
+app.get('/', (req, res) => {
+    res.sendFile(__dirname + '/ui.html');
 });
 
-server.listen(PORT, () => {
-    console.log(`Addon běží na portu: ${PORT}`);
-    console.log(`URL do Stremia: https://vas-url-render-com/manifest.json`);
+// 2. Stremio SDK Router (vše ostatní)
+app.use(getRouter(addon));
+
+// --- START SERVER ---
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Server běží na portu: ${PORT}`);
+    console.log(`Web UI: http://localhost:${PORT}/`);
 });

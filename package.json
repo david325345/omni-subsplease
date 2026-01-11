@@ -1,7 +1,7 @@
 {
   "name": "stremio-addon-final",
-  "version": "1.7.0",
-  "description": "Direct Router Solution",
+  "version": "2.0.0",
+  "description": "Web UI + Addon",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -9,7 +9,8 @@
   "dependencies": {
     "axios": "^1.6.0",
     "stremio-addon-sdk": "1.6.0",
-    "xml2js": "^0.6.2"
+    "xml2js": "^0.6.2",
+    "express": "^4.18.2"
   },
   "engines": {
     "node": "18.x"
