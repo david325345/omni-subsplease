@@ -1,7 +1,7 @@
 {
-  "name": "subsplease-addon",
+  "name": "stremio-addon-final",
   "version": "1.0.0",
-  "description": "Stremio Addon pro SubsPlease s Real-Debrid",
+  "description": "Clean Stremio Addon",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
