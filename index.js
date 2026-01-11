@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V16 (Pouze Název Seriálu) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V17 (BEZPEČNÁ DATA) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,21 +7,21 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v16";
+const ADDON_NAME = "SubsPlease RD v17";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
 
 // CACHE & PROMĚNNÉ
 let rssItems = [];
-let metadataCache = new Map(); // Klíč bude název seriálu (např. "One Piece")
+let metadataCache = new Map(); 
 
 // --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v16',
-    version: '6.0.0',
+    id: 'community.subsplease.rd.v17',
+    version: '7.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease Addon - Hledání podle názvu seriálu',
+    description: 'SubsPlease Addon - Safe Data Handling',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['series'],
@@ -70,16 +70,10 @@ async function updateRssCache() {
 updateRssCache();
 setInterval(updateRssCache, 5 * 60 * 1000);
 
-// FUNKCE PRO EXTRAKCI NÁZVU SERIÁLU
-// Z "One Piece - 1092" udělá "One Piece"
+// Extrakt názvu seriálu
 function extractSeriesName(fullTitle) {
-    // 1. Odstraníme vše v hranatých závorkách [SubsPlease], [1080p] atd.
     let clean = fullTitle.replace(/\[.*?\]/g, '').trim();
-    
-    // 2. Rozdělíme podle pomlčky " - " (standardní formát SubsPlease je Název - Číslo)
     const parts = clean.split(/\s+-\s+/);
-    
-    // Vrátíme první část (název seriálu)
     return parts[0].trim();
 }
 
@@ -87,24 +81,19 @@ function extractSeriesName(fullTitle) {
 async function getAniListMeta(fullTitle) {
     const seriesName = extractSeriesName(fullTitle);
     
-    // Pokud už máme metadata pro tento seriál, vrátíme je
     if (metadataCache.has(seriesName)) {
         return metadataCache.get(seriesName);
     }
-
-    console.log(`Hledám AniList pro seriál: "${seriesName}"`);
 
     const query = `
         query ($search: String) {
           Media(search: $search, type: ANIME) {
             id
-            title { romaji english }
+            title { romaji english native }
             description
             coverImage { extraLarge large }
             bannerImage
             genres
-            status
-            seasonYear
           }
         }
     `;
@@ -117,12 +106,13 @@ async function getAniListMeta(fullTitle) {
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }
         });
 
-        const media = response.data.data.Media;
+        const media = response.data?.data?.Media;
         if (media) {
-            metadataCache.set(seriesName, media); // Uložíme pod názvem seriálu
+            console.log(`AniList nalezeno: ${seriesName}`);
+            metadataCache.set(seriesName, media);
             return media;
         } else {
-            console.log(`AniList nenašel: ${seriesName}`);
+            console.log(`AniList nenašl: ${seriesName}`);
         }
         return null;
     } catch (error) {
@@ -189,7 +179,6 @@ const catalogHandler = async (config) => {
         
         const id = `subsplease:${Buffer.from(title).toString('base64')}`;
         
-        // Placeholder poster - použijeme název seriálu pro generování avataru, aby to bylo konzistentní
         const seriesName = extractSeriesName(title);
         const poster = `https://ui-avatars.com/api/?name=${encodeURIComponent(seriesName)}&background=6c5ce7&color=fff&size=300&font-size=0.3`;
 
@@ -210,28 +199,31 @@ const catalogHandler = async (config) => {
 const metaHandler = async (id, extra) => {
     try {
         const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
-        
-        // Načítáme metadata podle názvu seriálu
         const aniData = await getAniListMeta(originalTitle);
-
-        const seriesName = aniData 
-            ? (aniData.title.english || aniData.title.romaji) 
-            : extractSeriesName(originalTitle);
+        const seriesName = extractSeriesName(originalTitle);
+        
+        // BEZPEČNÝ PŘÍSTUP K DATŮM (?. operátor)
+        // Pokud aniData není null, snažíme se vzít data, jinak použijeme zálohu
+        const title = aniData?.title?.english || aniData?.title?.romaji || originalTitle;
+        const poster = aniData?.coverImage?.extraLarge || aniData?.coverImage?.large || `https://ui-avatars.com/api/?name=${encodeURIComponent(seriesName)}&background=6c5ce7&color=fff&size=300&font-size=0.3`;
+        const banner = aniData?.bannerImage || `https://picsum.photos/seed/bg/${encodeURIComponent(seriesName)}/1200/600`;
+        const description = aniData?.description ? aniData.description.replace(/<[^>]*>/g, '').substring(0, 500) + "..." : `Seriál: ${seriesName}`;
+        const genres = aniData?.genres || ['Anime'];
 
         return {
             meta: {
                 id: id,
                 type: 'series',
-                name: originalTitle, // Zobrazujeme název epizody v záhlaví
-                poster: aniData ? aniData.coverImage.extraLarge : '',
-                background: aniData ? aniData.bannerImage : '',
-                description: aniData ? aniData.description.replace(/<[^>]*>/g, '').substring(0, 500) + "..." : '',
-                genres: aniData ? aniData.genres : ['Anime'],
+                name: title,
+                poster: poster,
+                background: banner,
+                description: description,
+                genres: genres,
                 videos: [{ title: originalTitle, released: new Date().toISOString() }]
             }
         };
     } catch (error) {
-        console.error("Meta Error:", error);
+        console.error("Meta Error:", error.message);
         return { meta: null };
     }
 };
