@@ -1,7 +1,7 @@
 {
-  "name": "stremio-addon-final",
-  "version": "1.0.0",
-  "description": "Clean Stremio Addon",
+  "name": "stremio-addon-clean",
+  "version": "1.1.0",
+  "description": "Clean Stremio Addon v2",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"

@@ -1,9 +1,14 @@
-const { serveHTTP, manifestBuilder } = require('stremio-addon-sdk');
+// TESTOVACI LOG: Pokud uvidíte v logu "SPOUŠTÍM NOVÝ KÓD", jede tento soubor.
+console.log(">>> SPOUŠTÍM NOVÝ KÓD <<<");
+
+const sdk = require('stremio-addon-sdk');
+const serveHTTP = sdk.serveHTTP;
+const manifestBuilder = sdk.manifestBuilder;
 const axios = require('axios');
 const xml2js = require('xml2js');
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD";
+const ADDON_NAME = "SubsPlease RD v2";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 
@@ -124,10 +129,10 @@ const streamHandler = async (args) => {
 
 // --- MANIFEST ---
 const manifest = manifestBuilder({
-    id: 'community.subsplease.rd',
-    version: '1.0.0',
+    id: 'community.subsplease.rd.v2',
+    version: '1.1.0',
     name: ADDON_NAME,
-    description: 'SubsPlease + Real-Debrid Addon',
+    description: 'SubsPlease + Real-Debrid Addon v2',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie', 'series'],
