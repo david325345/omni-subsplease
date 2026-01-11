@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V18 (DEBUG & SAFE DESC) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V19 (MOVIE TYP PRO ZOBRAZENÍ) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,7 +7,7 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v18";
+const ADDON_NAME = "SubsPlease RD v19";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
@@ -17,17 +17,18 @@ let rssItems = [];
 let metadataCache = new Map(); 
 
 // --- MANIFEST OBJEKT ---
+// ZMĚNA: type 'series' -> 'movie'
 const manifestObj = {
-    id: 'community.subsplease.rd.v18',
-    version: '8.0.0',
+    id: 'community.subsplease.rd.v19',
+    version: '9.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease Addon - Debug Version',
+    description: 'SubsPlease Addon - Movie Type',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
-    types: ['series'],
+    types: ['movie'], // Změna na movie pro jednodušší metadata
     resources: ['catalog', 'stream', 'meta'],
-    catalogs: [{ type: 'series', id: 'subsplease-feed', name: 'Nejnovější epizody' }],
-    behaviorHints: { configurable: false }
+    catalogs: [{ type: 'movie', id: 'subsplease-feed', name: 'Nejnovější epizody' }],
+    behaviorHints: { configurationRequired: false }
 };
 
 // --- MIDDLEWARE ---
@@ -70,7 +71,7 @@ async function updateRssCache() {
 updateRssCache();
 setInterval(updateRssCache, 5 * 60 * 1000);
 
-// Extrakt názvu
+// Extrakt názvu seriálu
 function extractSeriesName(fullTitle) {
     let clean = fullTitle.replace(/\[.*?\]/g, '').trim();
     const parts = clean.split(/\s+-\s+/);
@@ -90,7 +91,6 @@ async function getAniListMeta(fullTitle) {
             description
             coverImage { extraLarge large }
             bannerImage
-            genres
           }
         }
     `;
@@ -102,18 +102,15 @@ async function getAniListMeta(fullTitle) {
         }, {
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }
         });
-
         const media = response.data?.data?.Media;
         if (media) {
             console.log(`AniList nalezeno: ${seriesName}`);
             metadataCache.set(seriesName, media);
             return media;
-        } else {
-            console.log(`AniList nenašl: ${seriesName}`);
         }
         return null;
     } catch (error) {
-        console.error(`AniList Error pro ${seriesName}:`, error.response?.status, error.message);
+        console.error(`AniList Error pro ${seriesName}:`, error.message);
         return null;
     }
 }
@@ -169,11 +166,13 @@ const catalogHandler = async (config) => {
         const magnetLink = match ? match[1] : null;
         const id = `subsplease:${Buffer.from(title).toString('base64')}`;
         const seriesName = extractSeriesName(title);
+        
+        // Placeholder - pro movie typ je to ok
         const poster = `https://ui-avatars.com/api/?name=${encodeURIComponent(seriesName)}&background=6c5ce7&color=fff&size=300&font-size=0.3`;
 
         return {
             id: id,
-            type: 'series',
+            type: 'movie', // ZMĚNA
             name: title,
             poster: poster,
             background: `https://picsum.photos/seed/bg/${encodeURIComponent(seriesName)}/1200/600`,
@@ -186,50 +185,31 @@ const catalogHandler = async (config) => {
 };
 
 const metaHandler = async (id, extra) => {
-    console.log(`--- DEBUG META START ---`);
     try {
         const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
-        console.log(`Step 1: Decoded Title: ${originalTitle}`);
-        
         const aniData = await getAniListMeta(originalTitle);
-        console.log(`Step 2: AniList Data: ${aniData ? 'OK' : 'NULL'}`);
-        
         const seriesName = extractSeriesName(originalTitle);
-        console.log(`Step 3: Series Name: ${seriesName}`);
         
-        // BEZPEČNÉ ZÍSKÁNÍ DAT
-        const safeTitle = (aniData?.title?.english || aniData?.title?.romaji || originalTitle).substring(0, 200);
-        const safePoster = aniData?.coverImage?.extraLarge || aniData?.coverImage?.large || `https://ui-avatars.com/api/?name=${encodeURIComponent(seriesName)}&background=6c5ce7&color=fff&size=300&font-size=0.3`;
-        const safeBanner = aniData?.bannerImage || `https://picsum.photos/seed/bg/${encodeURIComponent(seriesName)}/1200/600`;
-        
-        // Zjednodušení popisku - odstranění regex replace kvůli pádům
-        let safeDesc = "";
-        if (aniData && aniData.description && typeof aniData.description === 'string') {
-            // Použijeme jen substring, nebudeme dělat regex replace
-            safeDesc = aniData.description.substring(0, 500) + "...";
-        } else {
-            safeDesc = `Seriál: ${seriesName}`;
-        }
-        console.log(`Step 4: Data prepared.`);
-        
-        const resultMeta = {
-            id: id,
-            type: 'series',
-            name: safeTitle,
-            poster: safePoster,
-            background: safeBanner,
-            description: safeDesc,
-            genres: aniData?.genres || ['Anime'],
-            videos: [{ title: originalTitle, released: new Date().toISOString() }]
+        // PRO MOVIE TYP nepotřebujeme pole videos, jen jednoduchá data
+        const title = aniData?.title?.english || aniData?.title?.romaji || originalTitle;
+        const poster = aniData?.coverImage?.extraLarge || aniData?.coverImage?.large || `https://ui-avatars.com/api/?name=${encodeURIComponent(seriesName)}&background=6c5ce7&color=fff&size=300&font-size=0.3`;
+        const banner = aniData?.bannerImage || `https://picsum.photos/seed/bg/${encodeURIComponent(seriesName)}/1200/600`;
+        const description = aniData?.description ? aniData.description.substring(0, 500) + "..." : `Seriál: ${seriesName}`;
+
+        // Vracíme objekt meta bez "videos" pro typ movie
+        return {
+            meta: {
+                id: id,
+                type: 'movie', // ZMĚNA
+                name: title,
+                poster: poster,
+                background: banner,
+                description: description,
+                // genres odstraněny pro zjednodušení
+            }
         };
-        
-        console.log(`Step 5: Returning Meta.`);
-        console.log(`--- DEBUG META END ---`);
-        
-        return { meta: resultMeta };
     } catch (error) {
-        console.error("!!! META CRASH !!!", error.message);
-        console.error(error.stack);
+        console.error("Meta Error:", error.message);
         return { meta: null };
     }
 };
@@ -245,6 +225,7 @@ const streamHandler = async (id, extra) => {
         if (!item || !item.description?.[0]) {
             throw new Error("Epizoda nenalezena v RSS cache.");
         }
+        
         const descHtml = item.description[0];
         const match = descHtml.match(/href="([^"]+)"/);
         const magnetLink = match ? match[1] : null;
