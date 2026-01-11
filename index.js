@@ -1,18 +1,18 @@
-console.log(">>> ZAHÁJENÍ V4 (SPRÁVNÝ NÁZEV FUNKCE) <<<");
+console.log(">>> ZAHÁJENÍ V5 (SPRÁVNÁ STRUKTURA SDK 1.X) <<<");
 
-// NASTAVENÍ IMPORTŮ
 const sdk = require('stremio-addon-sdk');
-const addonBuilder = sdk.addonBuilder; // Zde je změna! addonBuilder místo manifestBuilder
+const addonBuilder = sdk.addonBuilder;
 const serveHTTP = sdk.serveHTTP;
 
 const axios = require('axios');
 const xml2js = require('xml2js');
 
-const ADDON_NAME = "SubsPlease RD v4";
+// --- KONFIGURACE ---
+const ADDON_NAME = "SubsPlease RD v5";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 
-// Získání klíče
+// Pomocná funkce
 const getRdKey = (args) => {
     if (args.config && args.config.rd_token) return args.config.rd_token;
     if (args.extra && args.extra.config && args.extra.config.rd_token) return args.extra.config.rd_token;
@@ -61,7 +61,8 @@ async function getRdStreamLink(magnetLink, rdToken) {
     }
 }
 
-// --- CATALOG HANDLER ---
+// --- HANDLERS (Čisté funkce) ---
+
 const catalogHandler = async ({ config }) => {
     try {
         const response = await axios.get(SUBSPLEASE_RSS);
@@ -93,7 +94,6 @@ const catalogHandler = async ({ config }) => {
     }
 };
 
-// --- STREAM HANDLER ---
 const streamHandler = async (args) => {
     const rdToken = getRdKey(args);
     if (!rdToken) throw new Error("Chybí RD token.");
@@ -123,12 +123,21 @@ const streamHandler = async (args) => {
     }
 };
 
-// --- MANIFEST (PŘEPSÁNO NA addonBuilder) ---
-const manifest = addonBuilder({
-    id: 'community.subsplease.rd.v4',
-    version: '1.3.0',
+const configHandler = () => {
+    return [{
+        key: 'rd_token',
+        type: 'text',
+        title: 'Real-Debrid API Token',
+        description: 'Vložte token'
+    }];
+};
+
+// --- VYTVOŘENÍ ADDONU (BUILDER) ---
+const addon = addonBuilder({
+    id: 'community.subsplease.rd.v5',
+    version: '1.5.0',
     name: ADDON_NAME,
-    description: 'SubsPlease + Real-Debrid Addon v4',
+    description: 'SubsPlease + Real-Debrid Addon v5',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie', 'series'],
@@ -137,26 +146,16 @@ const manifest = addonBuilder({
     behaviorHints: { configurationRequired: true }
 });
 
-// --- CONFIG HANDLER ---
-const configHandler = () => {
-    return [{
-        key: 'rd_token',
-        type: 'text',
-        title: 'Real-Debrid API Token',
-        description: 'Vložte token'
-    }];
-}
+// --- PŘIPOJENÍ HANDLERŮ (KLÍČOVÁ ČÁST) ---
+// Zde připojíme napsané funkce k addon objektu
+addon.defineCatalogHandler(catalogHandler);
+addon.defineStreamHandler(streamHandler);
+addon.defineConfigHandler(configHandler);
 
-// --- START ---
-const addonInterface = {
-    manifest: manifest,
-    catalog: catalogHandler,
-    stream: streamHandler,
-    config: configHandler
-};
-
+// --- START SERVER ---
+// Posíláme přímo addon, ne manuální objekt!
 const PORT = process.env.PORT || 3000;
-serveHTTP(addonInterface, { port: PORT, cache: CACHE_MAX_AGE })
+serveHTTP(addon, { port: PORT, cache: CACHE_MAX_AGE })
     .then(({ url }) => {
         console.log(`Addon běží: ${url}`);
     });
