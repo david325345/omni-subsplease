@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V23 (NORMALIZACE TEXTU) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V24 (BULLETPROOF STREAM) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,7 +7,7 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v23";
+const ADDON_NAME = "SubsPlease RD v24";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
@@ -18,10 +18,10 @@ let metadataCache = new Map();
 
 // --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v23',
-    version: '13.0.0',
+    id: 'community.subsplease.rd.v24',
+    version: '14.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease Addon - Fixed Text Matching',
+    description: 'SubsPlease Addon - Bulletproof Stream',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie'],
@@ -55,7 +55,7 @@ const getRdKey = (req) => {
     return config.rd_token || null;
 };
 
-// Aktualizace RSS
+// Aktualizace RSS (Pouze pro Katalog)
 async function updateRssCache() {
     try {
         const response = await axios.get(SUBSPLEASE_RSS);
@@ -71,7 +71,6 @@ updateRssCache();
 setInterval(updateRssCache, 5 * 60 * 1000);
 
 function extractSeriesName(fullTitle) {
-    // Normalizujeme i při extrakci
     let clean = fullTitle.replace(/\[.*?\]/g, '').trim();
     const parts = clean.split(/\s+-\s+/);
     return parts[0].trim();
@@ -215,61 +214,71 @@ const streamHandler = async (id, extra) => {
     const rdToken = extra.rd_token;
     if (!rdToken) throw new Error("Chybí RD token.");
 
-    try {
-        const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
-        
-        // POKUS 1: Normalizovaná přesná shoda
-        // Obojí strany odstraníme mezery a normalizujeme unicode (NFC)
-        const normSearch = originalTitle.trim().normalize('NFC');
-        
-        let item = rssItems.find(i => {
-            const rssTitle = (i.title?.[0] || "").trim().normalize('NFC');
-            return rssTitle === normSearch;
-        });
+    const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
+    
+    let item = null;
 
-        // POKUS 2: Pokud selhala, Live Refresh
-        if (!item) {
-            console.log(`Presná shoda selhala: ${originalTitle.substring(0, 30)}...`);
-            clearInterval(updateRssCache);
-            await updateRssCache();
-            setInterval(updateRssCache, 5 * 60 * 1000);
+    // POKUS 1: Hledáme v globální cache
+    item = rssItems.find(i => {
+        const t = (i.title?.[0] || "").trim().normalize('NFC');
+        const s = originalTitle.trim().normalize('NFC');
+        return t === s;
+    });
 
-            // Zkusíme znovu s normalizací
-            item = rssItems.find(i => {
-                const rssTitle = (i.title?.[0] || "").trim().normalize('NFC');
-                return rssTitle === normSearch;
+    // POKUS 2: FRESH FETCH (Pokud není v cache)
+    if (!item) {
+        console.log(`Stream: Nenalezeno v cache, provádím FRESH FETCH pro: ${originalTitle.substring(0, 30)}...`);
+        
+        try {
+            const response = await axios.get(SUBSPLEASE_RSS);
+            const parser = new xml2js.Parser();
+            const result = await parser.parseStringPromise(response.data);
+            const freshItems = result.rss?.channel?.[0]?.item || [];
+            
+            console.log(`Fresh RSS načteno. Hledám v ${freshItems.length} položkách.`);
+            
+            // 2A: Přesná shoda
+            item = freshItems.find(i => {
+                const t = (i.title?.[0] || "").trim().normalize('NFC');
+                const s = originalTitle.trim().normalize('NFC');
+                return t === s;
             });
-        }
-        
-        // POKUS 3: Hash Search
-        if (!item) {
-            const hash = extractHash(originalTitle);
-            if (hash) {
-                console.log(`Hash search: ${hash}`);
-                item = rssItems.find(i => {
-                    const t = i.title?.[0] || "";
-                    return t.includes(`[${hash}]`);
-                });
+
+            // 2B: Hash search
+            if (!item) {
+                const hash = extractHash(originalTitle);
+                if (hash) {
+                    item = freshItems.find(i => {
+                        const t = i.title?.[0] || "";
+                        return t.includes(`[${hash}]`);
+                    });
+                }
             }
-        }
-        
-        if (!item || !item.description?.[0]) {
-            throw new Error("Epizoda nenalezena (presná shoda, live refresh ani hash selhaly).");
-        }
-        
-        const descHtml = item.description[0];
-        const match = descHtml.match(/href="([^"]+)"/);
-        const magnetLink = match ? match[1] : null;
 
-        if (!magnetLink) throw new Error("Magnet nenalezen.");
-        console.log(`Stream start: ${item.title[0].substring(0, 30)}...`);
-
-        const rdLink = await getRdStreamLink(magnetLink, rdToken);
-        return { streams: [{ title: `RD 1080p`, url: rdLink }] };
-    } catch (error) {
-        console.error("Stream Error:", error.message);
-        throw error;
+            // Aktualizujeme globální cache, pokud jsme našli item
+            if (item) {
+                rssItems = freshItems;
+                console.log("Item nalezeno v Fresh Fetchu. Cache aktualizována.");
+            }
+        } catch (e) {
+            console.error("Chyba při Fresh Fetch:", e.message);
+            throw new Error("Nepodařilo se načíst RSS pro vyhledání epizody.");
+        }
     }
+    
+    if (!item || !item.description?.[0]) {
+        throw new Error("Epizoda nenalezena ani po Fresh Fetch.");
+    }
+    
+    const descHtml = item.description[0];
+    const match = descHtml.match(/href="([^"]+)"/);
+    const magnetLink = match ? match[1] : null;
+
+    if (!magnetLink) throw new Error("Magnet nenalezen.");
+    console.log(`Stream přehrávám: ${item.title[0].substring(0, 30)}...`);
+
+    const rdLink = await getRdStreamLink(magnetLink, rdToken);
+    return { streams: [{ title: `RD 1080p`, url: rdLink }] };
 };
 
 // --- ROUTING ---
