@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V26 (FIX XML PARSING) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V27 (DEEP DEBUG) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,7 +7,7 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v26";
+const ADDON_NAME = "SubsPlease RD v27";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
@@ -16,13 +16,14 @@ const ANILIST_API = 'https://graphql.anilist.co';
 let rssItems = [];
 let metadataCache = new Map(); 
 let streamCache = new Map(); 
+let rssIntervalId = null; // Pro správné clearInterval
 
 // --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v26',
-    version: '16.0.0',
+    id: 'community.subsplease.rd.v27',
+    version: '17.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease Addon - Fixed XML',
+    description: 'SubsPlease Addon - Deep Debug',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie'],
@@ -56,26 +57,46 @@ const getRdKey = (req) => {
     return config.rd_token || null;
 };
 
-// Aktualizace RSS (OPRAVENÝ PARSING)
+// Aktualizace RSS (Deep Debug)
 async function updateRssCache() {
     try {
         const response = await axios.get(SUBSPLEASE_RSS);
-        const parser = new xml2js.Parser();
+        // Přidám trim: true pro bezpečnost
+        const parser = new xml2js.Parser({ trim: true });
         const result = await parser.parseStringPromise(response.data);
         
-        // FIX: Zkontrolujeme, jestli je channel Array nebo Object
-        const channelData = result.rss?.channel;
-        const channel = Array.isArray(channelData) ? channelData[0] : channelData;
+        // DEBUG LOG: Co vlastně parser vrátil?
+        console.log("=== PARSED KEYS ===");
+        console.log(Object.keys(result));
+        console.log("RSS TYPE:", typeof result.rss);
+        console.log("RSS HAS CHANNEL?", !!result.rss?.channel);
         
-        rssItems = channel?.item || []; // Vezmeme items z opraveného channelu
+        // POKUS O SMART NALEZENÍ
+        let channel = null;
+        if (result.rss && result.rss.channel) {
+            channel = result.rss.channel;
+            if (Array.isArray(channel)) channel = channel[0];
+        } else if (result.channel) {
+            channel = result.channel;
+            if (Array.isArray(channel)) channel = channel[0];
+        }
+
+        rssItems = channel?.item || [];
         
         console.log(`RSS Cache aktualizována. Načteno ${rssItems.length} položek.`);
+        if (rssItems.length > 0) {
+            console.log("FIRST ITEM TITLE:", rssItems[0].title?.[0]);
+        } else {
+            console.log("ERROR: CHANNEL STRUCTURE", JSON.stringify(channel).substring(0, 500));
+        }
+        
     } catch (error) {
         console.error("Chyba aktualizace RSS Cache:", error.message);
     }
 }
 updateRssCache();
-setInterval(updateRssCache, 5 * 60 * 1000);
+if (rssIntervalId) clearInterval(rssIntervalId);
+rssIntervalId = setInterval(updateRssCache, 5 * 60 * 1000);
 
 function extractSeriesName(fullTitle) {
     let clean = fullTitle.replace(/\[.*?\]/g, '').trim();
@@ -167,8 +188,7 @@ async function getRdStreamLink(magnetLink, rdToken) {
 // --- HANDLERS ---
 
 const catalogHandler = async (config) => {
-    if (rssItems.length === 0) await new Promise(r => setTimeout(r, 2000)); // Čekáme déle na start
-    
+    if (rssItems.length === 0) await new Promise(r => setTimeout(r, 2000));
     streamCache.clear();
 
     const metas = rssItems.map(item => {
@@ -243,9 +263,8 @@ const streamHandler = async (id, extra) => {
     }
 
     // 2. Fallback RSS
-    console.log(`Stream nenalezen v cache, hledám v RSS...`);
+    console.log(`Nenalezeno v cache, hledám v RSS pro ID: ${id.substring(0, 20)}...`);
     
-    // Normalizace pro vyhledávání
     const normSearch = originalTitle.trim().normalize('NFC');
     item = rssItems.find(i => {
         const t = (i.title?.[0] || "").trim().normalize('NFC');
@@ -272,6 +291,8 @@ const streamHandler = async (id, extra) => {
     const magnetLink = match ? match[1] : null;
 
     if (!magnetLink) throw new Error("Magnet nenalezen.");
+
+    streamCache.set(id, { magnet: magnetLink, title: item.title[0] });
 
     console.log(`Stream z RSS: ${item.title[0].substring(0, 30)}...`);
     const rdLink = await getRdStreamLink(magnetLink, rdToken);
