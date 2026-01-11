@@ -1,7 +1,6 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V9 (EXPLICITNÍ MANIFEST ROUTE) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V10 (PEVNÝ MANIFEST JSON) <<<");
 
 const express = require('express');
-const http = require('http');
 const sdk = require('stremio-addon-sdk');
 const addonBuilder = sdk.addonBuilder;
 const getRouter = sdk.getRouter;
@@ -12,7 +11,7 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v9";
+const ADDON_NAME = "SubsPlease RD v10";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 
@@ -128,28 +127,32 @@ const streamHandler = async (args) => {
     }
 };
 
-// --- ADDON BUILDER ---
-const addon = addonBuilder({
-    id: 'community.subsplease.rd.v9',
+// --- MANIFEST DEFINICE (VYTÁHNUTÁ DO PROMĚNNÉ) ---
+const manifestObj = {
+    id: 'community.subsplease.rd.v10',
     version: '2.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease + Real-Debrid Addon v9',
+    description: 'SubsPlease + Real-Debrid Addon v10',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie', 'series'],
     resources: ['catalog', 'stream', 'meta'],
     catalogs: [{ type: 'movie', id: 'subsplease-feed', name: 'Nejnovější epizody' }],
-});
+};
+
+// --- ADDON BUILDER ---
+const addon = addonBuilder(manifestObj);
 
 addon.defineCatalogHandler(catalogHandler);
 addon.defineStreamHandler(streamHandler);
 
-// --- ROUTING (OPRAVENÉ) ---
+// --- ROUTING ---
 
-// 1. EXPLICITNÍ ROUTE PRO MANIFEST (Oprava EOF chyby)
+// 1. EXPLICITNÍ ROUTE PRO MANIFEST (OPRAVENA ODPOVĚĎ)
 app.get('/manifest.json', (req, res) => {
-    console.log("Požadavek na manifest.json");
-    res.json(addon.manifest);
+    console.log("Odesílám manifest JSON:", manifestObj.id);
+    // Posíláme přímo manifestObj, abychom se vyhnuli chybě undefined z addon.manifest
+    res.json(manifestObj);
 });
 
 // 2. Webové UI na domovské stránce
@@ -157,7 +160,7 @@ app.get('/', (req, res) => {
     res.sendFile(__dirname + '/ui.html');
 });
 
-// 3. Stremio SDK Router (catalogs, streams, meta)
+// 3. Stremio SDK Router
 app.use(getRouter(addon));
 
 // --- START SERVER ---
