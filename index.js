@@ -1,15 +1,14 @@
-console.log(">>> ZAHÁJENÍ V3 (FIXED IMPORT) <<<");
+console.log(">>> ZAHÁJENÍ V4 (SPRÁVNÝ NÁZEV FUNKCE) <<<");
 
-// VYŘEŠENÍ PROBLÉMU S IMPORTEM:
+// NASTAVENÍ IMPORTŮ
 const sdk = require('stremio-addon-sdk');
+const addonBuilder = sdk.addonBuilder; // Zde je změna! addonBuilder místo manifestBuilder
 const serveHTTP = sdk.serveHTTP;
-const manifestBuilder = sdk.manifestBuilder;
 
-// Pokud stále hází chybu, zkusíme alternativu (starší metoda)
 const axios = require('axios');
 const xml2js = require('xml2js');
 
-const ADDON_NAME = "SubsPlease RD v3";
+const ADDON_NAME = "SubsPlease RD v4";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 
@@ -23,14 +22,12 @@ const getRdKey = (args) => {
 // --- REAL-DEBRID API ---
 async function getRdStreamLink(magnetLink, rdToken) {
     try {
-        // Add magnet
         const addRes = await axios.post('https://api.real-debrid.com/rest/1.0/torrents/addMagnet', 
             `magnet=${encodeURIComponent(magnetLink)}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
         const torrentId = addRes.data.id;
         
-        // Get Info
         const infoRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
@@ -44,13 +41,11 @@ async function getRdStreamLink(magnetLink, rdToken) {
             }
         }
         
-        // Select Files
         await axios.post(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${torrentId}`, 
             `files=${fileId}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
         
-        // Get Link
         const linksRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
@@ -128,18 +123,12 @@ const streamHandler = async (args) => {
     }
 };
 
-// --- MANIFEST ---
-// Zde testujeme, zda manifestBuilder existuje, pokud ne, napíšeme to do logu
-if (typeof manifestBuilder !== 'function') {
-    console.log("!!! CHYBA: manifestBuilder není funkce !!!");
-    console.log("Obsah SDK:", Object.keys(sdk));
-}
-
-const manifest = manifestBuilder({
-    id: 'community.subsplease.rd.v3',
-    version: '1.2.0',
+// --- MANIFEST (PŘEPSÁNO NA addonBuilder) ---
+const manifest = addonBuilder({
+    id: 'community.subsplease.rd.v4',
+    version: '1.3.0',
     name: ADDON_NAME,
-    description: 'SubsPlease + Real-Debrid Addon v3',
+    description: 'SubsPlease + Real-Debrid Addon v4',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie', 'series'],
