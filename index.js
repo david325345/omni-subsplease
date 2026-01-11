@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V38 (KOREKTNÍ RD LINK API) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V39 (SMART LINK SEARCH) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,7 +7,7 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v38";
+const ADDON_NAME = "SubsPlease RD v39";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
@@ -20,10 +20,10 @@ let lastRssUpdate = 0;
 
 // --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v38',
-    version: '28.0.0',
+    id: 'community.subsplease.rd.v39',
+    version: '29.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease Addon - Correct RD Link API',
+    description: 'SubsPlease Addon - Smart Link Search',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie'],
@@ -57,7 +57,7 @@ const getRdKey = (req) => {
     return config.rd_token || null;
 };
 
-// EXTRAKCE MAGNETU (V37 STABILIZOVANÁ)
+// EXTRAKCE MAGNETU (V36 STABILIZOVANÁ)
 function extractMagnet(item) {
     if (!item) return null;
 
@@ -163,7 +163,7 @@ async function getAniListMeta(fullTitle) {
     }
 }
 
-// --- REAL-DEBRID API (KOREKTNÍ LINK GENERACE) ---
+// --- REAL-DEBRID API (SMART LINK SEARCH) ---
 async function getRdStreamLink(magnetLink, rdToken) {
     try {
         // 1. ADD MAGNET
@@ -183,10 +183,10 @@ async function getRdStreamLink(magnetLink, rdToken) {
         const status = infoRes.data.status;
         const files = infoRes.data.files || [];
 
-        if (status === 'magnet_error') throw new Error('RD: Chyba magnetu.');
+        if (status === 'magnet_error') throw new Error('RD: Torrent je neplatný.');
         if (status === 'error') throw new Error('RD: Fatal chyba.');
         if (status === 'waiting_files_selection' && files.length > 0) {
-            // Vybereme video
+            // 3. FILE SELECTION
             console.log("RD: Vybírám video soubor...");
             let fileId = "all";
             const videoFiles = files.filter(f => f.path.match(/\.(mp4|mkv|avi)$/i));
@@ -199,40 +199,50 @@ async function getRdStreamLink(magnetLink, rdToken) {
                 `files=${fileId}`, 
                 { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 10000 }
             );
-            // Krátké čekání na zpracování
-            await new Promise(r => setTimeout(r, 2000)); 
+            await new Promise(r => setTimeout(r, 1000)); 
         }
 
-        // 3. ZÍSKÁNÍ FINÁLNÍHO URL (KOREKTNÍ POSTUP)
+        // 4. LINKS (SMART SEARCH)
         console.log("RD: Získávám linky...");
         const linksRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 25000 }
         );
 
         if (linksRes.data.links && linksRes.data.links.length > 0) {
-            // Získáme ID prvního odkazu
-            const linkId = linksRes.data.links[0].id;
+            const linkItem = linksRes.data.links[0];
+            console.log("DEBUG LINK ITEM:", JSON.stringify(linkItem).substring(0, 200)); // Logujeme strukturu
             
-            // VOLÁME /torrents/link/{id} pro přímý URL streamu
-            console.log(`RD: Generuji stream URL pro ID ${linkId}...`);
-            const linkDetailRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/link/${linkId}`, 
-                { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 10000 }
-            );
+            // Zkusíme různé klíče
+            let linkId = linkItem.id || linkItem.linkId || linkItem.link;
+            
+            if (linkId && typeof linkId === 'string') {
+                console.log(`RD: Používám ID (${linkId.substring(0, 20)}...) pro získání URL.`);
+                
+                // VOLÁME /torrents/link/{id}
+                const linkDetailRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/link/${linkId}`, 
+                    { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 10000 }
+                );
 
-            // Vracíme přímý URL (property 'stream' je HTTP stream URL, 'link' je stahovatelné)
-            const streamUrl = linkDetailRes.data.stream || linkDetailRes.data.link;
-            
-            if (streamUrl && typeof streamUrl === 'string' && streamUrl.startsWith('http')) {
-                console.log("RD: URL úspěšně generováno!");
-                return streamUrl;
-            } else {
-                console.error("RD: Struktura linku:", JSON.stringify(linkDetailRes.data).substring(0, 300));
-                throw new Error("RD: Nepodařilo se získat platný URL z odpovědi.");
+                // Získáme stream URL
+                const streamUrl = linkDetailRes.data.stream || linkDetailRes.data.link;
+                
+                if (streamUrl && typeof streamUrl === 'string' && streamUrl.startsWith('http')) {
+                    console.log("RD: Link úspěšně vygenerován.");
+                    return streamUrl;
+                } else {
+                    console.error("RD: Link ID bylo použito, ale odpověď neobsahuje URL.");
+                }
             }
-        } else {
-             // Fallback pro případ, že status je 'processing'
-            throw new Error("RD: Linky se připravují. Zkuste znovu za 1-2 minuty.");
         }
+
+        // Fallback: Pokud links pole selhalo, zkusíme stream nebo files
+        if (infoRes.data.stream && infoRes.data.stream.startsWith('http')) {
+            console.log("RD: Fallback na .stream");
+            return infoRes.data.stream;
+        }
+
+        throw new Error("RD: Nepodařilo se získat platný stream link.");
+
     } catch (error) {
         console.error("RD Error:", error.message);
         throw error;
@@ -350,7 +360,7 @@ const streamHandler = async (id, extra) => {
             const s = originalTitle.trim().normalize('NFC');
             return t === s;
         });
-
+        
         if (!item) {
              const hash = extractHash(originalTitle);
              if (hash) {
@@ -367,16 +377,23 @@ const streamHandler = async (id, extra) => {
     }
 
     const magnetLink = extractMagnet(item);
-    if (!magnetLink) throw new Error("Magnet nenalezen.");
+
+    if (!magnetLink) {
+        throw new Error("Magnet nenalezen.");
+    }
 
     // Uložení do cache
     streamCache.set(id, { magnet: magnetLink, title: originalTitle });
 
     console.log(`Stream start: ${originalTitle.substring(0, 30)}...`);
     
-    // ZDE SE ZAVOLÁ GETRDSTREAMLINK (V38)
-    const rdLink = await getRdStreamLink(magnetLink, rdToken);
-    return { streams: [{ title: `RD 1080p`, url: rdLink }] };
+    // ZDE SE ZAVOLÁ GETRDSTREAMLINK (V39)
+    try {
+        const rdLink = await getRdStreamLink(magnetLink, rdToken);
+        return { streams: [{ title: `RD 1080p`, url: rdLink }] };
+    } catch (error) {
+        throw error;
+    }
 };
 
 // --- ROUTING ---
