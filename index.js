@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V49 (PROVEN LOGIKA STARÉHO KÓDU) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V50 (HASH INJECTION FALLBACK) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,10 +7,13 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v49";
+const ADDON_NAME = "SubsPlease RD v50";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
+
+// Seznam trackerů (z vašeho starého kódu) pro generování magnetu
+const TRACKERS = 'tr=http://nyaa.tracker.wf:7777/announce&tr=udp://tracker.opentrackr.org:1337/announce&tr=udp://open.stealth.si:80/announce&tr=udp://exodus.desync.com:6969/announce&tr=udp://tracker.torrent.eu.org:451/announce&tr=http://tracker.mywaifu.best:6969/announce&tr=https://tracker.zhuqiy.com:443/announce&tr=udp://tracker.tryhackx.org:6969/announce&tr=udp://retracker.hotplug.ru:2710/announce&tr=udp://tracker.dler.com:6969/announce&tr=http://tracker.beeimg.com:6969/announce&tr=udp://t.overflow.biz:6969/announce&tr=wss://tracker.openwebtorrent.com';
 
 // CACHE & PROMĚNNÉ
 let rssItems = [];
@@ -20,10 +23,10 @@ let lastRssUpdate = 0;
 
 // --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v49',
-    version: '39.0.0',
+    id: 'community.subsplease.rd.v50',
+    version: '40.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease Addon - Proven Logic',
+    description: 'SubsPlease Addon - Hash Injection',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie'],
@@ -61,14 +64,12 @@ const getRdKey = (req) => {
 function extractMagnet(item) {
     if (!item) return null;
 
-    // Priority 1: <link>
     if (item.link) {
         const linkVal = Array.isArray(item.link) ? item.link[0] : item.link;
         if (linkVal && linkVal.startsWith('magnet:')) return linkVal;
         if (linkVal.$ && linkVal.$.url && linkVal.$.url.startsWith('magnet:')) return linkVal.$.url;
     }
 
-    // Priority 2: <enclosure>
     if (item.enclosure) {
         let enc = item.enclosure;
         if (Array.isArray(enc)) enc = enc[0];
@@ -77,7 +78,6 @@ function extractMagnet(item) {
         if (enc.url && enc.url.startsWith('magnet:')) return enc.url;
     }
 
-    // Priority 3: <description>
     let desc = item.description;
     if (Array.isArray(desc)) desc = desc[0];
     if (typeof desc !== 'string') desc = "";
@@ -174,7 +174,7 @@ async function getRdStreamLink(magnetLink, rdToken) {
         );
         const torrentId = addRes.data.id;
         
-        // 2. FILE SELECTION
+        // 2. INFO & FILE SELECTION
         console.log("RD: Získávám info...");
         const infoRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 25000 }
@@ -198,59 +198,64 @@ async function getRdStreamLink(magnetLink, rdToken) {
                 `files=${fileId}`, 
                 { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 10000 }
             );
+            await new Promise(r => setTimeout(r, 1000)); 
         }
 
-        // 3. POLLING LOOP (ŘEŠENÍ PROBÉMŮ S TIMINGEM)
-        let maxAttempts = 30; // 60 sekund
-        console.log("RD: Spouštím polling (čekám na stažení)...");
-        
-        while (maxAttempts-- > 0) {
-            // Neposíláme request každou 100ms, ale každé 2s, abychom RD nezahltili
-            if (maxAttempts < 29) {
-                await new Promise(r => setTimeout(r, 2000));
-            }
+        // 3. LINKS (UNRESTRICT LOGIC)
+        console.log("RD: Získávám linky (Unrestrict Logic)...");
+        const linksRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
+            { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 25000 }
+        );
 
-            const pollRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
-                { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 25000 }
-            );
+        let finalUrl = null;
+        let idToResolve = null;
+
+        if (linksRes.data.links && Array.isArray(linksRes.data.links)) {
+            const linkItem = linksRes.data.links[0];
             
-            const pollStatus = pollRes.data.status;
-            const pollLinks = pollRes.data.links;
-
-            if (pollStatus === 'downloaded' && pollLinks && pollLinks.length > 0) {
-                // PROVEN LOGIC: Vezmeme první link a pošleme na /unrestrict/link
-                const linkItem = pollLinks[0];
-                let rawLink = null;
-
-                // Extrakce URL (string nebo objekt)
-                if (typeof linkItem === 'string') {
-                    rawLink = linkItem;
-                } else if (typeof linkItem === 'object') {
-                    rawLink = linkItem.link || linkItem.download; 
-                    // Preferujeme link/download před id
-                }
-
-                if (rawLink && rawLink.startsWith('http')) {
-                    console.log("RD: Nalezen link, volám /unrestrict/link...");
-                    
-                    // KONEČNÝ VOLÁNÍ UNRESTRICT (To funguje)
-                    const unrestrictRes = await axios.post('https://api.real-debrid.com/rest/1.0/unrestrict/link', 
-                        `link=${encodeURIComponent(rawLink)}`, 
-                        { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 15000 }
-                    );
-
-                    // Vracíme vlastnost 'download' (pro MKV/MP4 je to to samé jako stream)
-                    if (unrestrictRes.data.download && unrestrictRes.data.download.startsWith('http')) {
-                        console.log("RD: Úspěch! URL získána přes Unrestrict.");
-                        return unrestrictRes.data.download;
-                    } else {
-                        console.log("RD: Unrestrict odpověď neobsahuje download link.");
+            if (typeof linkItem === 'string' && linkItem.startsWith('http')) {
+                console.log("RD: Nalezen přímý řetězec URL (Download Link).");
+                
+                // VOLÁME UNRESTRICT
+                if (linkItem.includes('/d/')) {
+                    console.log("RD: Je to download link, volám /unrestrict/link...");
+                    try {
+                        const unrestrictRes = await axios.post('https://api.real-debrid.com/rest/1.0/unrestrict/link', 
+                            `link=${encodeURIComponent(linkItem)}`, 
+                            { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 10000 }
+                        );
+                        
+                        // PROVEN LOGIC: Priority -> stream, else link
+                        if (unrestrictRes.data.stream) finalUrl = unrestrictRes.data.stream;
+                        else if (unrestrictRes.data.link) finalUrl = unrestrictRes.data.link;
+                        
+                        if (finalUrl) console.log("RD: Unrestrict URL získána.");
+                    } catch (e) {
+                        finalUrl = linkItem; // Fallback
                     }
+                } else {
+                    finalUrl = linkItem;
                 }
+            } else if (typeof linkItem === 'object') {
+                if (linkItem.stream) finalUrl = linkItem.stream;
+                else if (linkItem.link) finalUrl = linkItem.link;
+                else if (linkItem.id) idToResolve = linkItem.id;
             }
         }
 
-        throw new Error("RD: Časový limit - Nepodařilo se stáhnout a připravit torrent do 60 sekund.");
+        // FALLBACK NA DETAIL API
+        if (!finalUrl && idToResolve) {
+            console.log(`RD: Získávám detail pro ID ${idToResolve}...`);
+            const detailRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/link/${idToResolve}`, 
+                { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 10000 }
+            );
+            const streamUrl = detailRes.data.stream || detailRes.data.link;
+            if (streamUrl) finalUrl = streamUrl;
+        }
+
+        if (!finalUrl) throw new Error("RD: Nepodařilo se získat platný stream URL.");
+
+        return finalUrl;
     } catch (error) {
         console.error("RD Error:", error.message);
         throw error;
@@ -327,12 +332,7 @@ const streamHandler = async (id, extra) => {
 
     const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
     
-    // 1. PŘÍPRAVA ID (Apple TV fix)
-    if (originalTitle === 'subsplease' || originalTitle === 'subsplease-feed') {
-        throw new Error("Tato položka není k dispozici. Prosím, vyberte konkrétní epizodu.");
-    }
-
-    // 2. STREAM CACHE
+    // 1. STREAM CACHE
     const cachedStream = streamCache.get(id);
     if (cachedStream && cachedStream.magnet) {
         console.log(`Stream z CACHE: ${cachedStream.title.substring(0, 30)}...`);
@@ -344,7 +344,7 @@ const streamHandler = async (id, extra) => {
         }
     }
 
-    // 3. RSS SEARCH
+    // 2. RSS SEARCH
     console.log(`Nenalezeno v cache, hledám v RSS: ${originalTitle.substring(0, 30)}...`);
     
     let item = rssItems.find(i => {
@@ -353,18 +353,7 @@ const streamHandler = async (id, extra) => {
         return t === s;
     });
 
-    // 4. HASH SEARCH
-    if (!item) {
-        const hash = extractHash(originalTitle);
-        if (hash) {
-            item = rssItems.find(i => {
-                const t = (Array.isArray(i.title) ? i.title[0] : i.title || "");
-                return t.includes(`[${hash}]`);
-            });
-        }
-    }
-
-    // 5. LIVE FETCH
+    // 3. LIVE FETCH
     if (!item) {
         await updateRssCache();
         
@@ -373,14 +362,30 @@ const streamHandler = async (id, extra) => {
             const s = originalTitle.trim().normalize('NFC');
             return t === s;
         });
+    }
+
+    // 4. HASH INJECTION FALLBACK (V50 FEATURE)
+    if (!item) {
+        console.log("Epizoda nenalezena v RSS. Zkouším Hash Injection...");
+        const hash = extractHash(originalTitle);
         
-        if (!item) {
-             const hash = extractHash(originalTitle);
-             if (hash) {
-                item = rssItems.find(i => {
-                    const t = (Array.isArray(i.title) ? i.title[0] : i.title || "");
-                    return t.includes(`[${hash}]`);
-                });
+        if (hash) {
+            // Doplnění hashu na 40 znaků
+            const paddedHash = hash.padEnd(40, '0');
+            // Sestrojení magnet linku
+            const magnetLink = `magnet:?xt=urn:btih:${paddedHash}&dn=${encodeURIComponent(originalTitle)}&${TRACKERS}`;
+            console.log(`Magnet vytvořen z hashu: ${magnetLink.substring(0, 60)}...`);
+            
+            // Uložení do cache (zdroj je hash, ne magnet)
+            streamCache.set(id, { magnet: magnetLink, title: originalTitle });
+
+            console.log(`Stream start (Hash): ${originalTitle.substring(0, 30)}...`);
+            try {
+                const rdLink = await getRdStreamLink(magnetLink, rdToken);
+                return { streams: [{ title: `RD 1080p (Hash)`, url: rdLink }] };
+            } catch (e) {
+                console.error("Hash Injection selhal:", e.message);
+                throw new Error("Epizoda nenalezena v RSS ani v Hash Injection.");
             }
         }
     }
@@ -397,7 +402,6 @@ const streamHandler = async (id, extra) => {
 
     console.log(`Stream start: ${originalTitle.substring(0, 30)}...`);
     
-    // ZDE SE ZAVOLÁ GETRDSTREAMLINK (V49 PROVEN)
     try {
         const rdLink = await getRdStreamLink(magnetLink, rdToken);
         return { streams: [{ title: `RD 1080p`, url: rdLink }] };
