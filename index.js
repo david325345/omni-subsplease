@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V29 (PERSISTENT STREAM CACHE) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V30 (SMART MAGNET EXTRACTION) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,7 +7,7 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v29";
+const ADDON_NAME = "SubsPlease RD v30";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
@@ -20,10 +20,10 @@ let lastRssUpdate = 0;
 
 // --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v29',
-    version: '19.0.0',
+    id: 'community.subsplease.rd.v30',
+    version: '20.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease Addon - Persistent Cache',
+    description: 'SubsPlease Addon - Smart Magnet Extraction',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie'],
@@ -56,6 +56,31 @@ const getRdKey = (req) => {
     const config = getReqConfig(req);
     return config.rd_token || null;
 };
+
+// EXTRAKCE MAGNETU (OPRAVENÁ)
+function extractMagnet(item) {
+    // POKUS 1: <enclosure> tag (Standard RSS)
+    // xml2js ukládá atributy do $, pokud je tag jednoduchý, nebo pole, pokud jich je více
+    if (item.enclosure) {
+        if (item.enclosure.$ && item.enclosure.$.url) return item.enclosure.$.url;
+        if (Array.isArray(item.enclosure) && item.enclosure[0].$ && item.enclosure[0].$.url) {
+            return item.enclosure[0].$.url;
+        }
+    }
+
+    // POKUS 2: <description> HTML s chytrým regexem
+    // Hledáme href=... a zkontrolujeme, jestli obsahuje "magnet:"
+    const desc = Array.isArray(item.description) ? item.description[0] : item.description;
+    if (desc && typeof desc === 'string') {
+        // Regex: href=" nebo href=', pak vzít cokoliv, co není " a není >
+        const match = desc.match(/href=(["'])(.*?)\1/);
+        if (match && match[2]) {
+            if (match[2].startsWith('magnet:')) return match[2];
+        }
+    }
+
+    return null;
+}
 
 // Aktualizace RSS
 async function updateRssCache() {
@@ -172,31 +197,25 @@ async function getRdStreamLink(magnetLink, rdToken) {
 // --- HANDLERS ---
 
 const catalogHandler = async (config) => {
-    // POZOR: NEČISTÍME streamCache!
-    // Pouze ji aktualizujeme.
-    
-    // Čekáme na data startu
     while (rssItems.length === 0) {
         await new Promise(r => setTimeout(r, 200));
     }
 
     const metas = rssItems.map(item => {
-        const title = Array.isArray(item.title) ? item.title[0] : item.title;
-        if (!title) return null;
-
+        const title = Array.isArray(item.title) ? item.title[0] : item.title || "Unknown";
         const pubDate = Array.isArray(item.pubDate) ? item.pubDate[0] : item.pubDate || "";
-        const descHtml = Array.isArray(item.description) ? item.description[0] : item.description || "";
         
-        const match = descHtml.match(/href="([^"]+)"/);
-        const magnetLink = match ? match[1] : null;
+        // POUŽÍME NOVOU FUNKCI extractMagnet
+        const magnetLink = extractMagnet(item);
         
         const id = `subsplease:${Buffer.from(title).toString('base64')}`;
         const seriesName = extractSeriesName(title);
         const poster = `https://ui-avatars.com/api/?name=${encodeURIComponent(seriesName)}&background=6c5ce7&color=fff&size=300&font-size=0.3`;
         
-        // ZACHOVÁNÍ PERSISTENT CACHE: Přepiseme pouze pokud existuje
         if (magnetLink) {
             streamCache.set(id, { magnet: magnetLink, title: title });
+        } else {
+            console.log(`WARNING: Magnet nenalezen pro: ${title.substring(0, 30)}...`);
         }
 
         return {
@@ -247,77 +266,61 @@ const streamHandler = async (id, extra) => {
 
     const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
     
-    // 1. PERSISTENT CACHE CHECK (Primární řešení)
+    // 1. PERSISTENT CACHE CHECK
+    let item = null;
     const cachedStream = streamCache.get(id);
     if (cachedStream && cachedStream.magnet) {
-        console.log(`Stream z PERSISTENT CACHE: ${cachedStream.title.substring(0, 30)}...`);
-        try {
-            const rdLink = await getRdStreamLink(cachedStream.magnet, rdToken);
-            return { streams: [{ title: `RD 1080p`, url: rdLink }] };
-        } catch (e) {
-            console.error("RD Cache Link selhal, zkouším RSS...");
-            // Pokud selhaly staré magnetlinky, zkusíme RSS
-        }
+        console.log(`Stream z CACHE: ${cachedStream.title.substring(0, 30)}...`);
+        const rdLink = await getRdStreamLink(cachedStream.magnet, rdToken);
+        return { streams: [{ title: `RD 1080p`, url: rdLink }] };
     }
 
-    // 2. RSS SEARCH
-    console.log(`Stream nenalezen v cache, hledám v RSS pro: ${originalTitle.substring(0, 30)}...`);
+    // 2. RSS SEARCH (S extractMagnet)
+    console.log(`Nenalezeno v cache, hledám v RSS: ${originalTitle.substring(0, 30)}...`);
     
-    let item = rssItems.find(i => {
+    item = rssItems.find(i => {
         const t = (Array.isArray(i.title) ? i.title[0] : i.title || "").trim().normalize('NFC');
         const s = originalTitle.trim().normalize('NFC');
         return t === s;
     });
 
-    // 3. FALLBACK HASH SEARCH
+    // 3. LIVE FETCH + HASH
     if (!item) {
-        const hash = extractHash(originalTitle);
-        if (hash) {
-            item = rssItems.find(i => {
-                const t = (Array.isArray(i.title) ? i.title[0] : i.title || "");
-                return t.includes(`[${hash}]`);
-            });
-        }
-    }
-
-    // 4. LIVE FETCH (Pokud nic)
-    if (!item) {
-        console.log("Item nenalezen, provádím LIVE FETCH...");
         await updateRssCache();
         
+        // Zkusíme znovu přesně
         item = rssItems.find(i => {
             const t = (Array.isArray(i.title) ? i.title[0] : i.title || "").trim().normalize('NFC');
             const s = originalTitle.trim().normalize('NFC');
             return t === s;
         });
 
+        // Zkusíme hash
         if (!item) {
-             const hash = extractHash(originalTitle);
-             if (hash) {
+            const hash = extractHash(originalTitle);
+            if (hash) {
                 item = rssItems.find(i => {
-                    const t = (Array.isArray(i.title) ? i.title[0] : i.title || "");
+                    const t = Array.isArray(i.title) ? i.title[0] : i.title || "";
                     return t.includes(`[${hash}]`);
                 });
             }
         }
     }
-    
+
     if (!item) {
-        throw new Error("Epizoda nenalezena ani po Live Fetch (je příliš stará).");
+        throw new Error("Epizoda nenalezena v RSS.");
     }
-    
-    // Získání magnetu z nalezeného itemu
-    const descHtml = Array.isArray(item.description) ? item.description[0] : item.description || "";
-    const match = descHtml.match(/href="([^"]+)"/);
-    const magnetLink = match ? match[1] : null;
 
-    if (!magnetLink) throw new Error("Magnet nenalezen.");
+    const magnetLink = extractMagnet(item);
 
-    console.log(`Stream z RSS: ${item.title.substring(0, 30)}...`);
+    if (!magnetLink) {
+        throw new Error("Magnet nenalezen v popisku ani v enclosure.");
+    }
 
-    // Aktualizujeme persistent cache pro příště
+    // Uložení do cache
     streamCache.set(id, { magnet: magnetLink, title: originalTitle });
 
+    console.log(`Stream z RSS: ${originalTitle.substring(0, 30)}...`);
     const rdLink = await getRdStreamLink(magnetLink, rdToken);
     return { streams: [{ title: `RD 1080p`, url: rdLink }] };
 };
@@ -375,13 +378,11 @@ app.get('/', (req, res) => {
     res.sendFile(__dirname + '/ui.html');
 });
 
-// --- ROBUST INIT ---
 (async () => {
     console.log("Inicializuji RSS před startem...");
     await updateRssCache();
     console.log("RSS načteno. Spouštím server...");
     
-    // Automatický refresh (pouze pro metadata)
     setInterval(updateRssCache, 5 * 60 * 1000);
     
     const PORT = process.env.PORT || 3000;
