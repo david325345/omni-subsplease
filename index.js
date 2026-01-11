@@ -1,14 +1,15 @@
-// TESTOVACI LOG: Pokud uvidíte v logu "SPOUŠTÍM NOVÝ KÓD", jede tento soubor.
-console.log(">>> SPOUŠTÍM NOVÝ KÓD <<<");
+console.log(">>> ZAHÁJENÍ V3 (FIXED IMPORT) <<<");
 
+// VYŘEŠENÍ PROBLÉMU S IMPORTEM:
 const sdk = require('stremio-addon-sdk');
 const serveHTTP = sdk.serveHTTP;
 const manifestBuilder = sdk.manifestBuilder;
+
+// Pokud stále hází chybu, zkusíme alternativu (starší metoda)
 const axios = require('axios');
 const xml2js = require('xml2js');
 
-// --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v2";
+const ADDON_NAME = "SubsPlease RD v3";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 
@@ -128,11 +129,17 @@ const streamHandler = async (args) => {
 };
 
 // --- MANIFEST ---
+// Zde testujeme, zda manifestBuilder existuje, pokud ne, napíšeme to do logu
+if (typeof manifestBuilder !== 'function') {
+    console.log("!!! CHYBA: manifestBuilder není funkce !!!");
+    console.log("Obsah SDK:", Object.keys(sdk));
+}
+
 const manifest = manifestBuilder({
-    id: 'community.subsplease.rd.v2',
-    version: '1.1.0',
+    id: 'community.subsplease.rd.v3',
+    version: '1.2.0',
     name: ADDON_NAME,
-    description: 'SubsPlease + Real-Debrid Addon v2',
+    description: 'SubsPlease + Real-Debrid Addon v3',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie', 'series'],

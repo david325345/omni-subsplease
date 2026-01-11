@@ -1,14 +1,14 @@
 {
-  "name": "stremio-addon-clean",
-  "version": "1.1.0",
-  "description": "Clean Stremio Addon v2",
+  "name": "stremio-addon-final",
+  "version": "1.2.0",
+  "description": "Clean Stremio Addon v3",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "axios": "^1.6.0",
-    "stremio-addon-sdk": "^1.6.2",
+    "stremio-addon-sdk": "^1.1.0",
     "xml2js": "^0.6.2"
   },
   "engines": {
