@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V40 (INTELIGENT LINKY) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V41 (DIAGNOSTIKA URL) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,7 +7,7 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v40";
+const ADDON_NAME = "SubsPlease RD v41";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
@@ -20,10 +20,10 @@ let lastRssUpdate = 0;
 
 // --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v40',
-    version: '30.0.0',
+    id: 'community.subsplease.rd.v41',
+    version: '31.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease Addon - Intelligent Links',
+    description: 'SubsPlease Addon - URL Diagnosis',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie'],
@@ -57,7 +57,7 @@ const getRdKey = (req) => {
     return config.rd_token || null;
 };
 
-// EXTRAKCE MAGNETU (V36 STABILIZOVANÁ)
+// EXTRAKCE MAGNETU (V40 STABILIZOVANÁ)
 function extractMagnet(item) {
     if (!item) return null;
 
@@ -163,7 +163,7 @@ async function getAniListMeta(fullTitle) {
     }
 }
 
-// --- REAL-DEBRID API (INTELIGENT LINKY) ---
+// --- REAL-DEBRID API (V41 - DIAGNOSTIKA) ---
 async function getRdStreamLink(magnetLink, rdToken) {
     try {
         // 1. ADD MAGNET
@@ -186,7 +186,6 @@ async function getRdStreamLink(magnetLink, rdToken) {
         if (status === 'magnet_error') throw new Error('RD: Torrent je neplatný.');
         if (status === 'error') throw new Error('RD: Fatal chyba.');
         if (status === 'waiting_files_selection' && files.length > 0) {
-            // 3. FILE SELECTION
             console.log("RD: Vybírám video soubor...");
             let fileId = "all";
             const videoFiles = files.filter(f => f.path.match(/\.(mp4|mkv|avi)$/i));
@@ -202,62 +201,53 @@ async function getRdStreamLink(magnetLink, rdToken) {
             await new Promise(r => setTimeout(r, 1000)); 
         }
 
-        // 4. LINKS (INTELIGENTNÍ EXTRAKCE)
+        // 3. LINKS (INTELIGENTNÍ EXTRAKCE)
         console.log("RD: Získávám linky...");
         const linksRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 25000 }
         );
 
-        if (linksRes.data.links && linksRes.data.links.length > 0) {
-            const linkItem = linksRes.data.links[0];
+        let finalUrl = null;
+        const body = linksRes.data;
+
+        if (body.links && body.links.length > 0) {
+            const linkItem = body.links[0];
             
-            // A) Je to rovnou řetězec URL?
+            // A) Je to rovnou řetězec?
             if (typeof linkItem === 'string' && linkItem.startsWith('http')) {
                 console.log("RD: Link je přímo řetězec URL.");
-                return linkItem;
+                finalUrl = linkItem;
             }
-            
-            // B) Je to objekt?
-            if (typeof linkItem === 'object') {
-                // 1. Zkusíme stream (HTTP stream)
-                if (linkItem.stream && typeof linkItem.stream === 'string' && linkItem.stream.startsWith('http')) {
-                    console.log("RD: Link nalezen v .stream");
-                    return linkItem.stream;
-                }
-                // 2. Zkusíme download (HTTP stahovací)
-                if (linkItem.download && typeof linkItem.download === 'string' && linkItem.download.startsWith('http')) {
-                    console.log("RD: Link nalezen v .download");
-                    return linkItem.download;
-                }
-                // 3. Zkusíme link (Obyčejný)
-                if (linkItem.link && typeof linkItem.link === 'string' && linkItem.link.startsWith('http')) {
-                    console.log("RD: Link nalezen v .link");
-                    return linkItem.link;
-                }
-                
-                // 4. Zkusíme získat ID a zavolat /link/{id}
-                const linkId = linkItem.id || linkItem.linkId;
-                if (linkId) {
-                    console.log(`RD: Získávám detail pro ID ${linkId}...`);
-                    const linkDetailRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/link/${linkId}`, 
-                        { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 10000 }
-                    );
-                    const streamUrl = linkDetailRes.data.stream || linkDetailRes.data.link;
-                    if (streamUrl && typeof streamUrl === 'string' && streamUrl.startsWith('http')) {
-                        console.log("RD: Link získán přes API detail.");
-                        return streamUrl;
+            // B) Objekt - zkusíme .stream, .link, .id
+            else if (typeof linkItem === 'object') {
+                if (linkItem.stream) finalUrl = linkItem.stream;
+                else if (linkItem.link) finalUrl = linkItem.link;
+                else if (linkItem.id) {
+                    // Voláme detail
+                    try {
+                        const detailRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/link/${linkItem.id}`, 
+                            { headers: { 'Authorization': `Bearer ${rdToken}` }, timeout: 10000 }
+                        );
+                        finalUrl = detailRes.data.stream || detailRes.data.link;
+                    } catch (e) {
+                        // Ignorujeme chybu, zkusíme fallback
                     }
                 }
             }
-        } else {
-             // Fallback pro .stream v rootu
-             if (infoRes.data.stream && infoRes.data.stream.startsWith('http')) {
-                 console.log("RD: Link nalezen v .stream (root).");
-                 return infoRes.data.stream;
-             }
         }
 
-        throw new Error("RD: Nepodařilo se získat platný stream link (zkoušeny všechny metody).");
+        // Fallback
+        if (!finalUrl && body.stream) finalUrl = body.stream;
+
+        if (!finalUrl) {
+            throw new Error("RD: Nepodařilo se získat platný URL.");
+        }
+        
+        // TRIM
+        finalUrl = finalUrl.trim();
+
+        return finalUrl;
+
     } catch (error) {
         console.error("RD Error:", error.message);
         throw error;
@@ -334,12 +324,16 @@ const streamHandler = async (id, extra) => {
 
     const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
     
-    // 1. STREAM CACHE
+    // 1. STREAM CACHE CHECK
     const cachedStream = streamCache.get(id);
     if (cachedStream && cachedStream.magnet) {
         console.log(`Stream z CACHE: ${cachedStream.title.substring(0, 30)}...`);
         try {
             const rdLink = await getRdStreamLink(cachedStream.magnet, rdToken);
+            
+            // KRITICKÝ LOG
+            console.log("!!! FINAL RETURN URL !!!:", rdLink);
+            
             return { streams: [{ title: `RD 1080p`, url: rdLink }] };
         } catch (e) {
             console.error("RD Cache Link selhal, zkouším RSS...");
@@ -375,7 +369,7 @@ const streamHandler = async (id, extra) => {
             const s = originalTitle.trim().normalize('NFC');
             return t === s;
         });
-
+        
         if (!item) {
              const hash = extractHash(originalTitle);
              if (hash) {
@@ -399,9 +393,13 @@ const streamHandler = async (id, extra) => {
 
     console.log(`Stream start: ${originalTitle.substring(0, 30)}...`);
     
-    // ZDE SE ZAVOLÁ GETRDSTREAMLINK (V40)
+    // ZDE SE ZAVOLÁ GETRDSTREAMLINK (V41)
     try {
         const rdLink = await getRdStreamLink(magnetLink, rdToken);
+        
+        // KRITICKÝ LOG (ZNOVU)
+        console.log("!!! FINAL RETURN URL (CACHE MISS) !!!:", rdLink);
+        
         return { streams: [{ title: `RD 1080p`, url: rdLink }] };
     } catch (error) {
         throw error;
@@ -450,6 +448,11 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     try {
         const extra = getReqConfig(req);
         const data = await streamHandler(id, extra);
+        
+        // ZDE SE ODESÍLÁ DATA DO STREMIA
+        // Přidání logu pro absolutní jistotu, že se kód dostal až sem
+        console.log("SENDING RESPONSE TO CLIENT...", JSON.stringify(data));
+        
         res.json(data);
     } catch (error) {
         console.error(error);
