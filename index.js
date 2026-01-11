@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V11 (NO SDK - MANUAL ROUTING) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V12 (OPRAVENÉ URL CESTY) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,16 +7,16 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v11";
+const ADDON_NAME = "SubsPlease RD v12";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 
-// --- MANIFEST OBJEKT (Manuální definice) ---
+// --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v11',
+    id: 'community.subsplease.rd.v12',
     version: '3.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease + Real-Debrid Addon v11 (No SDK)',
+    description: 'SubsPlease + Real-Debrid Addon v12',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie', 'series'],
@@ -38,30 +38,30 @@ app.use((req, res, next) => {
 
 // --- POMOCNÉ FUNKCE ---
 
-// Parsování configu z query parametrů (např. ?token=...)
+// Získání configu z URL
 const getReqConfig = (req) => {
-    // 1. Přímý parametr z instalace
-    if (req.query.token) return { rd_token: req.query.token };
-    
-    // 2. JSON parametr 'extra'
-    if (req.query.extra) {
-        try {
-            const parsed = JSON.parse(req.query.extra);
-            return parsed;
-        } catch (e) {
-            console.error("Chyba parsování extra:", e);
-        }
+    // 1. Přímý parametr ?token=... (z našeho UI)
+    if (req.query.token) {
+        return { rd_token: req.query.token };
     }
     
-    // 3. JSON parametr 'config'
+    // 2. Stremio formát ?config={...}
     if (req.query.config) {
         try {
             return JSON.parse(req.query.config);
         } catch (e) {}
     }
+    
+    // 3. Stremio formát ?extra={...}
+    if (req.query.extra) {
+        try {
+            return JSON.parse(req.query.extra);
+        } catch (e) {}
+    }
     return {};
 };
 
+// Logika pro získání klíče z požadavku
 const getRdKey = (req) => {
     const config = getReqConfig(req);
     if (config.rd_token) return config.rd_token;
@@ -110,7 +110,7 @@ async function getRdStreamLink(magnetLink, rdToken) {
     }
 }
 
-// --- HANDLERS (Jako samostatné funkce) ---
+// --- HANDLERS ---
 
 const catalogHandler = async (config) => {
     try {
@@ -142,8 +142,30 @@ const catalogHandler = async (config) => {
     }
 };
 
+const metaHandler = async (id, extra) => {
+    // Meta handler vrací detaily o jednom seriálu/epizodě
+    // Zde jen znovu projdeme RSS a najdeme match
+    const decodedTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
+    
+    try {
+        const response = await axios.get(SUBSPLEASE_RSS);
+        const parser = new xml2js.Parser();
+        const result = await parser.parseStringPromise(response.data);
+        const items = result.rss?.channel?.[0]?.item || [];
+        
+        const item = items.find(i => (i.title?.[0] || "").startsWith(decodedTitle.substring(0, 15)));
+        
+        if (!item || !item.description?.[0]) throw new Error("Item nenalezen.");
+
+        return { meta: { id, name: item.title[0] } };
+    } catch (error) {
+        console.error("Meta Error:", error);
+        return { meta: null };
+    }
+};
+
 const streamHandler = async (id, extra) => {
-    const rdToken = extra.rd_token; // Používáme extra z requestu
+    const rdToken = extra.rd_token;
     if (!rdToken) throw new Error("Chybí RD token.");
 
     try {
@@ -170,7 +192,7 @@ const streamHandler = async (id, extra) => {
     }
 };
 
-// --- ROUTING (MANUÁLNÍ - BEZ SDK) ---
+// --- ROUTING (STANDARDNÍ STREMIO FORMÁT) ---
 
 // 1. Manifest
 app.get('/manifest.json', (req, res) => {
@@ -178,9 +200,9 @@ app.get('/manifest.json', (req, res) => {
     res.json(manifestObj);
 });
 
-// 2. Catalog (Stremio volá např. /catalog/catalog/movie/subsplease-feed.json)
-app.get('/catalog/catalog/movie/subsplease-feed.json', async (req, res) => {
-    console.log("GET /catalog");
+// 2. Catalog: /catalog/{type}/{id}.json
+app.get('/catalog/:type/:id.json', async (req, res) => {
+    console.log(`GET /catalog/${req.params.type}/${req.params.id}.json`);
     try {
         const config = getReqConfig(req);
         const data = await catalogHandler(config);
@@ -191,10 +213,26 @@ app.get('/catalog/catalog/movie/subsplease-feed.json', async (req, res) => {
     }
 });
 
-// 3. Stream (Stremio volá např. /stream/movie/someId.json)
-app.get('/stream/movie/:id', async (req, res) => {
-    console.log("GET /stream");
-    // Express zachytí ID i s koncovkou .json nebo bez, musíme ji případně očistit
+// 3. Meta: /meta/{type}/{id}.json
+app.get('/meta/:type/:id.json', async (req, res) => {
+    console.log(`GET /meta/${req.params.type}/${req.params.id}.json`);
+    // Odstraníme koncovku .json z ID, pokud se tam dostala
+    let id = req.params.id;
+    if (id.endsWith('.json')) id = id.substring(0, id.length - 5);
+    
+    try {
+        const extra = getReqConfig(req);
+        const data = await metaHandler(id, extra);
+        res.json(data);
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 4. Stream: /stream/{type}/{id}.json
+app.get('/stream/:type/:id.json', async (req, res) => {
+    console.log(`GET /stream/${req.params.type}/${req.params.id}.json`);
     let id = req.params.id;
     if (id.endsWith('.json')) id = id.substring(0, id.length - 5);
 
@@ -208,7 +246,7 @@ app.get('/stream/movie/:id', async (req, res) => {
     }
 });
 
-// 4. Web UI
+// 5. Web UI
 app.get('/', (req, res) => {
     res.sendFile(__dirname + '/ui.html');
 });
