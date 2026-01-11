@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V8.1 (BEZ CONFIG REQUIREMENT) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V9 (EXPLICITNÍ MANIFEST ROUTE) <<<");
 
 const express = require('express');
 const http = require('http');
@@ -12,7 +12,7 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v8";
+const ADDON_NAME = "SubsPlease RD v9";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 
@@ -29,7 +29,6 @@ app.use((req, res, next) => {
 
 // --- LOGIKA GET API KEY ---
 const getRdKey = (args) => {
-    // Priorita: 1. URL parametr (?token=...), 2. Config (pokud by existoval)
     if (args.extra && args.extra.token) return args.extra.token;
     if (args.config && args.config.rd_token) return args.config.rd_token;
     return null;
@@ -131,33 +130,39 @@ const streamHandler = async (args) => {
 
 // --- ADDON BUILDER ---
 const addon = addonBuilder({
-    id: 'community.subsplease.rd.v8',
+    id: 'community.subsplease.rd.v9',
     version: '2.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease + Real-Debrid Addon v8',
+    description: 'SubsPlease + Real-Debrid Addon v9',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie', 'series'],
     resources: ['catalog', 'stream', 'meta'],
     catalogs: [{ type: 'movie', id: 'subsplease-feed', name: 'Nejnovější epizody' }],
-    // POZNÁMKA: Řádek behaviorHints byl odstraněn, aby se Stremio nepokoušelo o grafické nastavení
 });
 
 addon.defineCatalogHandler(catalogHandler);
 addon.defineStreamHandler(streamHandler);
 
-// --- ROUTING ---
-// 1. Webové UI na domovské stránce
+// --- ROUTING (OPRAVENÉ) ---
+
+// 1. EXPLICITNÍ ROUTE PRO MANIFEST (Oprava EOF chyby)
+app.get('/manifest.json', (req, res) => {
+    console.log("Požadavek na manifest.json");
+    res.json(addon.manifest);
+});
+
+// 2. Webové UI na domovské stránce
 app.get('/', (req, res) => {
     res.sendFile(__dirname + '/ui.html');
 });
 
-// 2. Stremio SDK Router (vše ostatní)
+// 3. Stremio SDK Router (catalogs, streams, meta)
 app.use(getRouter(addon));
 
 // --- START SERVER ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Server běží na portu: ${PORT}`);
-    console.log(`Web UI: http://localhost:${PORT}/`);
+    console.log(`Manifest: http://localhost:${PORT}/manifest.json`);
 });
