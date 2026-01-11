@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V12 (OPRAVENÉ URL CESTY) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V13 (ANILIST METADATA) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,22 +7,29 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v12";
+const ADDON_NAME = "SubsPlease RD v13";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
+const ANILIST_API = 'https://graphql.anilist.co';
+
+// Cache pro metadata, abychom nezahltili API
+const metadataCache = new Map();
 
 // --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v12',
-    version: '3.0.0',
+    id: 'community.subsplease.rd.v13',
+    version: '4.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease + Real-Debrid Addon v12',
+    description: 'SubsPlease + Real-Debrid Addon s AniList metadaty',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
-    types: ['movie', 'series'],
+    types: ['series', 'movie'], // Přidány types
     resources: ['catalog', 'stream', 'meta'],
-    catalogs: [{ type: 'movie', id: 'subsplease-feed', name: 'Nejnovější epizody' }],
-    // behaviorHints: { configurationRequired: false } 
+    catalogs: [{ type: 'series', id: 'subsplease-feed', name: 'Nejnovější epizody' }],
+    behaviorHints: {
+        // Nastavení pro lepší zobrazení v seznamu
+        configurable: false
+    }
 };
 
 // --- MIDDLEWARE ---
@@ -38,35 +45,65 @@ app.use((req, res, next) => {
 
 // --- POMOCNÉ FUNKCE ---
 
-// Získání configu z URL
 const getReqConfig = (req) => {
-    // 1. Přímý parametr ?token=... (z našeho UI)
-    if (req.query.token) {
-        return { rd_token: req.query.token };
-    }
-    
-    // 2. Stremio formát ?config={...}
-    if (req.query.config) {
-        try {
-            return JSON.parse(req.query.config);
-        } catch (e) {}
-    }
-    
-    // 3. Stremio formát ?extra={...}
-    if (req.query.extra) {
-        try {
-            return JSON.parse(req.query.extra);
-        } catch (e) {}
-    }
+    if (req.query.token) return { rd_token: req.query.token };
+    if (req.query.config) try { return JSON.parse(req.query.config); } catch (e) {}
+    if (req.query.extra) try { return JSON.parse(req.query.extra); } catch (e) {}
     return {};
 };
 
-// Logika pro získání klíče z požadavku
 const getRdKey = (req) => {
     const config = getReqConfig(req);
-    if (config.rd_token) return config.rd_token;
-    return null;
+    return config.rd_token || null;
 };
+
+// --- ANILIST INTEGRACE ---
+async function getAniListMeta(title) {
+    // Pokud už máme data v cache, vrátíme je
+    if (metadataCache.has(title)) {
+        return metadataCache.get(title);
+    }
+
+    try {
+        // Příprava GraphQL dotazu
+        // Hledáme anime podle názvu (AniList fuzzy search umí zpracovat "One Piece 1093")
+        const query = `
+            query ($search: String) {
+              Media(search: $search, type: ANIME) {
+                id
+                title { romaji english }
+                description
+                coverImage { extraLarge large }
+                bannerImage
+                genres
+                status
+                seasonYear
+                averageScore
+              }
+            }
+        `;
+
+        const response = await axios.post(ANILIST_API, {
+            query,
+            variables: { search: title }
+        }, {
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            }
+        });
+
+        const media = response.data.data.Media;
+        if (media) {
+            metadataCache.set(title, media);
+            return media;
+        }
+        return null;
+    } catch (error) {
+        console.error("AniList API Error:", error.response?.status, error.response?.statusText);
+        return null;
+    }
+}
 
 // --- REAL-DEBRID API ---
 async function getRdStreamLink(magnetLink, rdToken) {
@@ -76,7 +113,6 @@ async function getRdStreamLink(magnetLink, rdToken) {
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
         const torrentId = addRes.data.id;
-        
         const infoRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
@@ -89,12 +125,10 @@ async function getRdStreamLink(magnetLink, rdToken) {
                 fileId = videoFiles[0].id;
             }
         }
-        
         await axios.post(`https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${torrentId}`, 
             `files=${fileId}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
-        
         const linksRes = await axios.get(`https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, 
             { headers: { 'Authorization': `Bearer ${rdToken}` } }
         );
@@ -119,22 +153,36 @@ const catalogHandler = async (config) => {
         const result = await parser.parseStringPromise(response.data);
         const items = result.rss?.channel?.[0]?.item || [];
         
-        const metas = items.map(item => {
+        // Mapování položek s načítáním metadat
+        const metas = await Promise.all(items.map(async (item) => {
             const title = item.title?.[0] || "Unknown";
             const pubDate = item.pubDate?.[0] || "";
             const descHtml = item.description?.[0] || "";
             const match = descHtml.match(/href="([^"]+)"/);
             const magnetLink = match ? match[1] : null;
+            
+            // Generování ID (stejné jako předtím pro kompatibilitu streamů)
             const id = `subsplease:${Buffer.from(title).toString('base64').substring(0, 20)}`;
+
+            // Získání metadat z AniList
+            const aniData = await getAniListMeta(title);
+
+            // Vrácení meta objektu se sloučením dat
             return {
                 id: id,
-                type: 'movie',
-                name: title,
-                poster: `https://picsum.photos/seed/${encodeURIComponent(title)}/200/300`,
-                description: `Vydáno: ${new Date(pubDate).toLocaleString()}`,
-                subsplease_magnet: magnetLink 
+                type: 'series', // Změna z movie na series pro lepší metadata
+                name: aniData ? (aniData.title.english || aniData.title.romaji) : title,
+                poster: aniData ? aniData.coverImage.extraLarge : `https://picsum.photos/seed/${encodeURIComponent(title)}/200/300`,
+                background: aniData ? aniData.bannerImage : `https://picsum.photos/seed/bg/${encodeURIComponent(title)}/1200/600`,
+                description: aniData 
+                    ? aniData.description.replace(/<[^>]*>/g, '').substring(0, 500) + "..." 
+                    : `Vydáno: ${new Date(pubDate).toLocaleString()} (SubsPlease)`,
+                genres: aniData ? aniData.genres : ['Anime'],
+                // Uložíme magnet do custom vlastnosti pro stream handler
+                subsplease_magnet: magnetLink,
+                originalTitle: title
             };
-        });
+        }));
         return { metas };
     } catch (error) {
         console.error("RSS Error:", error.message);
@@ -143,21 +191,33 @@ const catalogHandler = async (config) => {
 };
 
 const metaHandler = async (id, extra) => {
-    // Meta handler vrací detaily o jednom seriálu/epizodě
-    // Zde jen znovu projdeme RSS a najdeme match
     const decodedTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
     
     try {
+        // Zkusíme znovu najít v RSS kvůli magnetu, ale hlavní informace vezmeme z AniList
         const response = await axios.get(SUBSPLEASE_RSS);
         const parser = new xml2js.Parser();
         const result = await parser.parseStringPromise(response.data);
         const items = result.rss?.channel?.[0]?.item || [];
         
         const item = items.find(i => (i.title?.[0] || "").startsWith(decodedTitle.substring(0, 15)));
-        
-        if (!item || !item.description?.[0]) throw new Error("Item nenalezen.");
+        if (!item) throw new Error("Item nenalezen.");
 
-        return { meta: { id, name: item.title[0] } };
+        const title = item.title[0];
+        const aniData = await getAniListMeta(title);
+
+        return { 
+            meta: {
+                id: id,
+                type: 'series',
+                name: aniData ? (aniData.title.english || aniData.title.romaji) : title,
+                poster: aniData ? aniData.coverImage.extraLarge : '',
+                background: aniData ? aniData.bannerImage : '',
+                description: aniData ? aniData.description : '',
+                genres: aniData ? aniData.genres : [],
+                videos: aniData ? [{ title: title, released: new Date().toISOString() }] : []
+            }
+        };
     } catch (error) {
         console.error("Meta Error:", error);
         return { meta: null };
@@ -192,15 +252,13 @@ const streamHandler = async (id, extra) => {
     }
 };
 
-// --- ROUTING (STANDARDNÍ STREMIO FORMÁT) ---
+// --- ROUTING ---
 
-// 1. Manifest
 app.get('/manifest.json', (req, res) => {
     console.log("GET /manifest.json");
     res.json(manifestObj);
 });
 
-// 2. Catalog: /catalog/{type}/{id}.json
 app.get('/catalog/:type/:id.json', async (req, res) => {
     console.log(`GET /catalog/${req.params.type}/${req.params.id}.json`);
     try {
@@ -213,10 +271,8 @@ app.get('/catalog/:type/:id.json', async (req, res) => {
     }
 });
 
-// 3. Meta: /meta/{type}/{id}.json
 app.get('/meta/:type/:id.json', async (req, res) => {
     console.log(`GET /meta/${req.params.type}/${req.params.id}.json`);
-    // Odstraníme koncovku .json z ID, pokud se tam dostala
     let id = req.params.id;
     if (id.endsWith('.json')) id = id.substring(0, id.length - 5);
     
@@ -230,7 +286,6 @@ app.get('/meta/:type/:id.json', async (req, res) => {
     }
 });
 
-// 4. Stream: /stream/{type}/{id}.json
 app.get('/stream/:type/:id.json', async (req, res) => {
     console.log(`GET /stream/${req.params.type}/${req.params.id}.json`);
     let id = req.params.id;
@@ -246,12 +301,10 @@ app.get('/stream/:type/:id.json', async (req, res) => {
     }
 });
 
-// 5. Web UI
 app.get('/', (req, res) => {
     res.sendFile(__dirname + '/ui.html');
 });
 
-// --- START SERVER ---
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Server běží na portu: ${PORT}`);
