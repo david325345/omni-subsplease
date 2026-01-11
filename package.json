@@ -1,5 +1,5 @@
 {
-  "name": "subsplease-rd-addon",
+  "name": "subsplease-addon",
   "version": "1.0.0",
   "description": "Stremio Addon pro SubsPlease s Real-Debrid",
   "main": "index.js",
