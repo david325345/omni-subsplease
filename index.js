@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V24 (BULLETPROOF STREAM) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V25 (STREAM CACHE FIX) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,7 +7,7 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v24";
+const ADDON_NAME = "SubsPlease RD v25";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
@@ -15,13 +15,14 @@ const ANILIST_API = 'https://graphql.anilist.co';
 // CACHE & PROMĚNNÉ
 let rssItems = [];
 let metadataCache = new Map(); 
+let streamCache = new Map(); // NOVÁ: Ukládáme magnet linky z katalogu
 
 // --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v24',
-    version: '14.0.0',
+    id: 'community.subsplease.rd.v25',
+    version: '15.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease Addon - Bulletproof Stream',
+    description: 'SubsPlease Addon - Cached Streams',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie'],
@@ -55,7 +56,7 @@ const getRdKey = (req) => {
     return config.rd_token || null;
 };
 
-// Aktualizace RSS (Pouze pro Katalog)
+// Aktualizace RSS (pouze pro metadata a refresh cache)
 async function updateRssCache() {
     try {
         const response = await axios.get(SUBSPLEASE_RSS);
@@ -94,6 +95,7 @@ async function getAniListMeta(fullTitle) {
             description
             coverImage { extraLarge large }
             bannerImage
+            genres
           }
         }
     `;
@@ -160,15 +162,26 @@ async function getRdStreamLink(magnetLink, rdToken) {
 
 const catalogHandler = async (config) => {
     if (rssItems.length === 0) await new Promise(r => setTimeout(r, 1000));
+    
+    // 1. Vyčistíme starou stream cache
+    streamCache.clear();
+
     const metas = rssItems.map(item => {
         const title = item.title?.[0] || "Unknown";
         const pubDate = item.pubDate?.[0] || "";
         const descHtml = item.description?.[0] || "";
         const match = descHtml.match(/href="([^"]+)"/);
         const magnetLink = match ? match[1] : null;
+        
         const id = `subsplease:${Buffer.from(title).toString('base64')}`;
         const seriesName = extractSeriesName(title);
         const poster = `https://ui-avatars.com/api/?name=${encodeURIComponent(seriesName)}&background=6c5ce7&color=fff&size=300&font-size=0.3`;
+        
+        // 2. Uložíme data do Stream Cache
+        if (magnetLink) {
+            streamCache.set(id, { magnet: magnetLink, title: title });
+        }
+
         return {
             id: id,
             type: 'movie',
@@ -176,10 +189,10 @@ const catalogHandler = async (config) => {
             poster: poster,
             background: `https://picsum.photos/seed/bg/${encodeURIComponent(seriesName)}/1200/600`,
             description: `Vydáno: ${new Date(pubDate).toLocaleString()}\nSeriál: ${seriesName}`,
-            subsplease_magnet: magnetLink,
             originalTitle: title
         };
     });
+    console.log(`Stream Cache aktualizována. Uloženo ${streamCache.size} položek.`);
     return { metas };
 };
 
@@ -214,71 +227,58 @@ const streamHandler = async (id, extra) => {
     const rdToken = extra.rd_token;
     if (!rdToken) throw new Error("Chybí RD token.");
 
-    const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
-    
-    let item = null;
-
-    // POKUS 1: Hledáme v globální cache
-    item = rssItems.find(i => {
-        const t = (i.title?.[0] || "").trim().normalize('NFC');
-        const s = originalTitle.trim().normalize('NFC');
-        return t === s;
-    });
-
-    // POKUS 2: FRESH FETCH (Pokud není v cache)
-    if (!item) {
-        console.log(`Stream: Nenalezeno v cache, provádím FRESH FETCH pro: ${originalTitle.substring(0, 30)}...`);
-        
-        try {
-            const response = await axios.get(SUBSPLEASE_RSS);
-            const parser = new xml2js.Parser();
-            const result = await parser.parseStringPromise(response.data);
-            const freshItems = result.rss?.channel?.[0]?.item || [];
-            
-            console.log(`Fresh RSS načteno. Hledám v ${freshItems.length} položkách.`);
-            
-            // 2A: Přesná shoda
-            item = freshItems.find(i => {
-                const t = (i.title?.[0] || "").trim().normalize('NFC');
-                const s = originalTitle.trim().normalize('NFC');
-                return t === s;
-            });
-
-            // 2B: Hash search
-            if (!item) {
-                const hash = extractHash(originalTitle);
-                if (hash) {
-                    item = freshItems.find(i => {
-                        const t = i.title?.[0] || "";
-                        return t.includes(`[${hash}]`);
-                    });
-                }
-            }
-
-            // Aktualizujeme globální cache, pokud jsme našli item
-            if (item) {
-                rssItems = freshItems;
-                console.log("Item nalezeno v Fresh Fetchu. Cache aktualizována.");
-            }
-        } catch (e) {
-            console.error("Chyba při Fresh Fetch:", e.message);
-            throw new Error("Nepodařilo se načíst RSS pro vyhledání epizody.");
+    try {
+        // 1. ZKUSÍME STREAM CACHE (Klíčové řešení!)
+        const cachedStream = streamCache.get(id);
+        if (cachedStream && cachedStream.magnet) {
+            console.log(`Stream nalezen v CACHE: ${cachedStream.title.substring(0, 30)}...`);
+            const rdLink = await getRdStreamLink(cachedStream.magnet, rdToken);
+            return { streams: [{ title: `RD 1080p`, url: rdLink }] };
         }
-    }
-    
-    if (!item || !item.description?.[0]) {
-        throw new Error("Epizoda nenalezena ani po Fresh Fetch.");
-    }
-    
-    const descHtml = item.description[0];
-    const match = descHtml.match(/href="([^"]+)"/);
-    const magnetLink = match ? match[1] : null;
 
-    if (!magnetLink) throw new Error("Magnet nenalezen.");
-    console.log(`Stream přehrávám: ${item.title[0].substring(0, 30)}...`);
+        // 2. FALLBACK: Hledání v RSS (Pokud se cache vyčistila nebo se refreshovala po dlouhé době)
+        console.log(`Nenalezeno v cache, hledám v RSS pro ID: ${id.substring(0, 20)}...`);
+        
+        let item = rssItems.find(i => {
+            const t = (i.title?.[0] || "").trim().normalize('NFC');
+            // Musíme rekonstruovat hledaný název z ID pro porovnání
+            const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
+            const s = originalTitle.trim().normalize('NFC');
+            return t === s;
+        });
 
-    const rdLink = await getRdStreamLink(magnetLink, rdToken);
-    return { streams: [{ title: `RD 1080p`, url: rdLink }] };
+        if (!item) {
+            // Fallback na Hash v RSS
+            const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
+            const hash = extractHash(originalTitle);
+            if (hash) {
+                item = rssItems.find(i => {
+                    const t = i.title?.[0] || "";
+                    return t.includes(`[${hash}]`);
+                });
+            }
+        }
+
+        if (!item || !item.description?.[0]) {
+            throw new Error("Epizoda nenalezena v Cache ani v RSS (je příliš stará).");
+        }
+
+        const descHtml = item.description[0];
+        const match = descHtml.match(/href="([^"]+)"/);
+        const magnetLink = match ? match[1] : null;
+
+        if (!magnetLink) throw new Error("Magnet nenalezen.");
+
+        // Uložíme do cache pro příště
+        streamCache.set(id, { magnet: magnetLink, title: item.title[0] });
+
+        console.log(`Stream nalezen v RSS Fallback: ${item.title[0].substring(0, 30)}...`);
+        const rdLink = await getRdStreamLink(magnetLink, rdToken);
+        return { streams: [{ title: `RD 1080p`, url: rdLink }] };
+    } catch (error) {
+        console.error("Stream Error:", error.message);
+        throw error;
+    }
 };
 
 // --- ROUTING ---
