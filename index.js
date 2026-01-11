@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V31 (BRUTE FORCE EXTRACT) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V32 (BULLETPROOF EXTRACT) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,7 +7,7 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v31";
+const ADDON_NAME = "SubsPlease RD v32";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
@@ -20,10 +20,10 @@ let lastRssUpdate = 0;
 
 // --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v31',
-    version: '21.0.0',
+    id: 'community.subsplease.rd.v32',
+    version: '22.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease Addon - Brute Force Extract',
+    description: 'SubsPlease Addon - Bulletproof',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie'],
@@ -57,41 +57,35 @@ const getRdKey = (req) => {
     return config.rd_token || null;
 };
 
-// EXTRAKCE MAGNETU (BRUTE FORCE)
+// EXTRAKCE MAGNETU (ÚPLNĚ BEZPEČNÁ)
 function extractMagnet(item) {
-    // 1. Zkusíme standardní enclosure
+    if (!item) return null;
+
+    // 1. ENCLOSURE (Priority 1)
     if (item.enclosure) {
-        // xml2js ukládá atributy do $ nebo do přímo do objektu
-        if (item.enclosure.$ && item.enclosure.$.url) {
-            // Ověříme, zda je to magnet
-            if (item.enclosure.$.url.startsWith('magnet:')) return item.enclosure.$.url;
-        }
-        if (item.enclosure.url && item.enclosure.url.startsWith('magnet:')) {
-            return item.enclosure.url;
+        let enc = item.enclosure;
+        // Ošetření Array (xml2js vrací enclosure jako pole často)
+        if (Array.isArray(enc)) enc = enc[0];
+
+        // Získání URL
+        if (enc) {
+            // xml2js vrací atributy v $ nebo přímo v objektu podle nastavení
+            const url = enc.$ ? enc.$.url : enc.url;
+            if (url && url.startsWith('magnet:')) return url;
         }
     }
 
-    // 2. Zkusíme description
+    // 2. DESCRIPTION (Priority 2)
     let desc = item.description;
-    // Normalizujeme: xml2js někdy vrátí Object (pokud je HTML uvnitř CDATA)
-    if (typeof desc !== 'string') {
-        // Pokud to není string, převedeme celý objekt na string a najdeme magnet:
-        // Toto je "Brute Force" metoda, která funguje na cokoliv.
-        const jsonStr = JSON.stringify(desc);
-        const magnetMatch = jsonStr.match(/(magnet:[^"'\s]+)/);
-        if (magnetMatch) return magnetMatch[1];
-        return null;
-    }
+    // Ošetření Array a Undefined
+    if (Array.isArray(desc)) desc = desc[0];
+    if (typeof desc !== 'string' || !desc) desc = ""; // Fallback na prázdný string
 
-    // 3. Pokud je to string, použijeme opravený Regex
-    // Hledáme href="..." nebo href='...' s mezerami
-    const match = desc.match(/href\s*=\s*(["'])(.*?)\1/);
-    if (match) {
-        const url = match[2];
-        if (url.startsWith('magnet:')) return url;
-    }
-    
-    // 4. Fallback: Hledáme slovo začínající na "magnet:" přímo v textu
+    // Regex pro href="..." i href='...'
+    const match = desc.match(/href=(["'])(.*?)\1/);
+    if (match && match[2] && match[2].startsWith('magnet:')) return match[2];
+
+    // Fallback regex pro "magnet:" kdekoliv v textu
     const directMagnet = desc.match(/(magnet:[^\s<]+)/);
     if (directMagnet) return directMagnet[1];
 
@@ -108,6 +102,7 @@ async function updateRssCache() {
     try {
         console.log("Aktualizuji RSS...");
         const response = await axios.get(SUBSPLEASE_RSS);
+        // Přidán explicitArray: false a mergeAttrs: true pro bezpečný parser
         const parser = new xml2js.Parser({ trim: true, explicitArray: false, mergeAttrs: true });
         const result = await parser.parseStringPromise(response.data);
         
@@ -213,14 +208,19 @@ async function getRdStreamLink(magnetLink, rdToken) {
 // --- HANDLERS ---
 
 const catalogHandler = async (config) => {
+    // Čekáme na startu
     while (rssItems.length === 0) {
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 500));
     }
 
     const metas = rssItems.map(item => {
-        const title = Array.isArray(item.title) ? item.title[0] : item.title || "Unknown";
+        // Ošetření title
+        const title = Array.isArray(item.title) ? item.title[0] : item.title;
+        if (!title) return null;
+
         const pubDate = Array.isArray(item.pubDate) ? item.pubDate[0] : item.pubDate || "";
         
+        // Používáme extractMagnet
         const magnetLink = extractMagnet(item);
         
         const id = `subsplease:${Buffer.from(title).toString('base64')}`;
@@ -229,9 +229,6 @@ const catalogHandler = async (config) => {
         
         if (magnetLink) {
             streamCache.set(id, { magnet: magnetLink, title: title });
-        } else {
-             // Pokud se stále nepovede, vypíšeme detail, ale nezahlceme konzoli
-             // (To už se stalo v předchozím kroku)
         }
 
         return {
@@ -243,7 +240,7 @@ const catalogHandler = async (config) => {
             description: `Vydáno: ${new Date(pubDate).toLocaleString()}\nSeriál: ${seriesName}`,
             originalTitle: title
         };
-    }).filter(m => m !== null);
+    }).filter(m => m !== null); // Odstraníme null položky
     
     console.log(`Katalog vrácen: ${metas.length} položek. Cache velikost: ${streamCache.size}`);
     return { metas };
@@ -282,7 +279,7 @@ const streamHandler = async (id, extra) => {
 
     const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
     
-    // 1. PERSISTENT CACHE CHECK
+    // 1. STREAM CACHE
     const cachedStream = streamCache.get(id);
     if (cachedStream && cachedStream.magnet) {
         console.log(`Stream z CACHE: ${cachedStream.title.substring(0, 30)}...`);
@@ -303,33 +300,23 @@ const streamHandler = async (id, extra) => {
         return t === s;
     });
 
-    // 3. HASH SEARCH
+    // 3. LIVE FETCH + HASH
     if (!item) {
-        const hash = extractHash(originalTitle);
-        if (hash) {
-            item = rssItems.find(i => {
-                const t = (Array.isArray(i.title) ? i.title[0] : i.title || "");
-                return t.includes(`[${hash}]`);
-            });
-        }
-    }
-
-    // 4. LIVE FETCH
-    if (!item) {
-        console.log("Item nenalezen, provádím LIVE FETCH...");
         await updateRssCache();
         
+        // Zkusíme znovu přesně
         item = rssItems.find(i => {
             const t = (Array.isArray(i.title) ? i.title[0] : i.title || "").trim().normalize('NFC');
             const s = originalTitle.trim().normalize('NFC');
             return t === s;
         });
 
+        // Hash fallback
         if (!item) {
-             const hash = extractHash(originalTitle);
-             if (hash) {
+            const hash = extractHash(originalTitle);
+            if (hash) {
                 item = rssItems.find(i => {
-                    const t = (Array.isArray(i.title) ? i.title[0] : i.title || "");
+                    const t = Array.isArray(i.title) ? i.title[0] : i.title || "";
                     return t.includes(`[${hash}]`);
                 });
             }
@@ -337,23 +324,19 @@ const streamHandler = async (id, extra) => {
     }
     
     if (!item) {
-        throw new Error("Epizoda nenalezena v RSS cache.");
+        throw new Error("Epizoda nenalezena v RSS.");
     }
 
-    // Použijeme BRUTE FORCE extrakci i v stream handleru
+    // Použití extractMagnet i zde
     const magnetLink = extractMagnet(item);
 
     if (!magnetLink) {
-        console.error("Nepodařilo se získat magnet pomocí extractMagnet. Posílám data do logů.");
-        // Debug log pro item, pokud to opět selže
-        console.log("FAILED ITEM STRUCTURE:", JSON.stringify(item.description).substring(0, 200));
+        console.error("Magnet nenalezen v itemu:", item);
         throw new Error("Magnet nenalezen.");
     }
 
-    // Uložení do cache
+    console.log(`Stream start: ${originalTitle.substring(0, 30)}...`);
     streamCache.set(id, { magnet: magnetLink, title: originalTitle });
-
-    console.log(`Stream z RSS: ${originalTitle.substring(0, 30)}...`);
 
     const rdLink = await getRdStreamLink(magnetLink, rdToken);
     return { streams: [{ title: `RD 1080p`, url: rdLink }] };
@@ -412,7 +395,7 @@ app.get('/', (req, res) => {
     res.sendFile(__dirname + '/ui.html');
 });
 
-// --- ROBUST INIT ---
+// --- INIT ---
 (async () => {
     console.log("Inicializuji RSS před startem...");
     await updateRssCache();
