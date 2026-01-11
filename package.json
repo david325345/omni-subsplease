@@ -1,14 +1,13 @@
 {
   "name": "stremio-addon-final",
-  "version": "2.0.0",
-  "description": "Web UI + Addon",
+  "version": "3.0.0",
+  "description": "No SDK Version",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "axios": "^1.6.0",
-    "stremio-addon-sdk": "1.6.0",
     "xml2js": "^0.6.2",
     "express": "^4.18.2"
   },
