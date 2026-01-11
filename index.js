@@ -1,22 +1,21 @@
-console.log(">>> ZAHÁJENÍ V6 (ODEBRÁNA NEEXISTUJÍCÍ METODA) <<<");
+console.log(">>> ZAHÁJENÍ V7 (PŘÍMÝ SERVER - BEZ SERVEHTTP) <<<");
 
 const sdk = require('stremio-addon-sdk');
 const addonBuilder = sdk.addonBuilder;
-const serveHTTP = sdk.serveHTTP;
+const getRouter = sdk.getRouter; // Použijeme router místo serveHTTP
 
+const http = require('http'); // Vložíme standardní Node.js http knihovnu
 const axios = require('axios');
 const xml2js = require('xml2js');
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v6";
+const ADDON_NAME = "SubsPlease RD v7";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 
 // Získání klíče
 const getRdKey = (args) => {
-    // 1. Zkusíme z standardní konfigurace (pokud by fungovala)
     if (args.config && args.config.rd_token) return args.config.rd_token;
-    // 2. Zkusíme z URL parametru (např. manifest.json?token=ABC123)
     if (args.extra && args.extra.token) return args.extra.token;
     return null;
 };
@@ -126,30 +125,47 @@ const streamHandler = async (args) => {
 };
 
 // --- VYTVOŘENÍ ADDONU ---
-// Odstranili jsme configurationRequired, protože nemáme definované UI pro config
 const addon = addonBuilder({
-    id: 'community.subsplease.rd.v6',
-    version: '1.6.0',
+    id: 'community.subsplease.rd.v7',
+    version: '1.7.0',
     name: ADDON_NAME,
-    description: 'SubsPlease + Real-Debrid Addon v6',
+    description: 'SubsPlease + Real-Debrid Addon v7',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie', 'series'],
     resources: ['catalog', 'stream', 'meta'],
     catalogs: [{ type: 'movie', id: 'subsplease-feed', name: 'Nejnovější epizody' }],
-    // Nastavení UI configu zablokovalo server, používáme fallback do URL
 });
 
 // --- PŘIPOJENÍ HANDLERŮ ---
 addon.defineCatalogHandler(catalogHandler);
 addon.defineStreamHandler(streamHandler);
 
-// POZOR: configHandler jsme odstranili, protože neexistuje v SDK!
+// --- START SERVER (PŘÍMÁ METODA) ---
+// Vytvoříme router z addonu
+const addonRouter = getRouter(addon);
 
-// --- START SERVER ---
 const PORT = process.env.PORT || 3000;
-serveHTTP(addon, { port: PORT, cache: CACHE_MAX_AGE })
-    .then(({ url }) => {
-        console.log(`Addon běží: ${url}`);
-        console.log(`Vložte URL do Stremia: ${url}/manifest.json`);
+const server = http.createServer((req, res) => {
+    // Přidáme CORS hlavičky pro větší spolehlivost
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+        res.writeHead(204);
+        res.end();
+        return;
+    }
+
+    // Předejeme požadavek do routeru addonu
+    addonRouter(req, res, () => {
+        res.writeHead(404);
+        res.end('Not Found');
     });
+});
+
+server.listen(PORT, () => {
+    console.log(`Addon běží na portu: ${PORT}`);
+    console.log(`URL do Stremia: https://vas-url-render-com/manifest.json`);
+});
