@@ -1,4 +1,4 @@
-console.log(">>> ZAHÁJENÍ V5 (SPRÁVNÁ STRUKTURA SDK 1.X) <<<");
+console.log(">>> ZAHÁJENÍ V6 (ODEBRÁNA NEEXISTUJÍCÍ METODA) <<<");
 
 const sdk = require('stremio-addon-sdk');
 const addonBuilder = sdk.addonBuilder;
@@ -8,14 +8,16 @@ const axios = require('axios');
 const xml2js = require('xml2js');
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v5";
+const ADDON_NAME = "SubsPlease RD v6";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 
-// Pomocná funkce
+// Získání klíče
 const getRdKey = (args) => {
+    // 1. Zkusíme z standardní konfigurace (pokud by fungovala)
     if (args.config && args.config.rd_token) return args.config.rd_token;
-    if (args.extra && args.extra.config && args.extra.config.rd_token) return args.extra.config.rd_token;
+    // 2. Zkusíme z URL parametru (např. manifest.json?token=ABC123)
+    if (args.extra && args.extra.token) return args.extra.token;
     return null;
 };
 
@@ -61,7 +63,7 @@ async function getRdStreamLink(magnetLink, rdToken) {
     }
 }
 
-// --- HANDLERS (Čisté funkce) ---
+// --- HANDLERS ---
 
 const catalogHandler = async ({ config }) => {
     try {
@@ -123,39 +125,31 @@ const streamHandler = async (args) => {
     }
 };
 
-const configHandler = () => {
-    return [{
-        key: 'rd_token',
-        type: 'text',
-        title: 'Real-Debrid API Token',
-        description: 'Vložte token'
-    }];
-};
-
-// --- VYTVOŘENÍ ADDONU (BUILDER) ---
+// --- VYTVOŘENÍ ADDONU ---
+// Odstranili jsme configurationRequired, protože nemáme definované UI pro config
 const addon = addonBuilder({
-    id: 'community.subsplease.rd.v5',
-    version: '1.5.0',
+    id: 'community.subsplease.rd.v6',
+    version: '1.6.0',
     name: ADDON_NAME,
-    description: 'SubsPlease + Real-Debrid Addon v5',
+    description: 'SubsPlease + Real-Debrid Addon v6',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie', 'series'],
     resources: ['catalog', 'stream', 'meta'],
     catalogs: [{ type: 'movie', id: 'subsplease-feed', name: 'Nejnovější epizody' }],
-    behaviorHints: { configurationRequired: true }
+    // Nastavení UI configu zablokovalo server, používáme fallback do URL
 });
 
-// --- PŘIPOJENÍ HANDLERŮ (KLÍČOVÁ ČÁST) ---
-// Zde připojíme napsané funkce k addon objektu
+// --- PŘIPOJENÍ HANDLERŮ ---
 addon.defineCatalogHandler(catalogHandler);
 addon.defineStreamHandler(streamHandler);
-addon.defineConfigHandler(configHandler);
+
+// POZOR: configHandler jsme odstranili, protože neexistuje v SDK!
 
 // --- START SERVER ---
-// Posíláme přímo addon, ne manuální objekt!
 const PORT = process.env.PORT || 3000;
 serveHTTP(addon, { port: PORT, cache: CACHE_MAX_AGE })
     .then(({ url }) => {
         console.log(`Addon běží: ${url}`);
+        console.log(`Vložte URL do Stremia: ${url}/manifest.json`);
     });
