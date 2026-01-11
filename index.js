@@ -1,4 +1,4 @@
-console.log(">>> SPAUŠTĚNÍ WEB UI V22 (DEBUG MODE) <<<");
+console.log(">>> SPAUŠTĚNÍ WEB UI V23 (NORMALIZACE TEXTU) <<<");
 
 const express = require('express');
 const axios = require('axios');
@@ -7,7 +7,7 @@ const xml2js = require('xml2js');
 const app = express();
 
 // --- KONFIGURACE ---
-const ADDON_NAME = "SubsPlease RD v22";
+const ADDON_NAME = "SubsPlease RD v23";
 const CACHE_MAX_AGE = 4 * 60 * 60; 
 const SUBSPLEASE_RSS = 'https://subsplease.org/rss/?r=1080';
 const ANILIST_API = 'https://graphql.anilist.co';
@@ -18,10 +18,10 @@ let metadataCache = new Map();
 
 // --- MANIFEST OBJEKT ---
 const manifestObj = {
-    id: 'community.subsplease.rd.v22',
-    version: '12.0.0',
+    id: 'community.subsplease.rd.v23',
+    version: '13.0.0',
     name: ADDON_NAME,
-    description: 'SubsPlease Addon - Debug Logs',
+    description: 'SubsPlease Addon - Fixed Text Matching',
     logo: 'https://picsum.photos/seed/icon/200/200',
     background: 'https://picsum.photos/seed/bg/1200/600',
     types: ['movie'],
@@ -71,6 +71,7 @@ updateRssCache();
 setInterval(updateRssCache, 5 * 60 * 1000);
 
 function extractSeriesName(fullTitle) {
+    // Normalizujeme i při extrakci
     let clean = fullTitle.replace(/\[.*?\]/g, '').trim();
     const parts = clean.split(/\s+-\s+/);
     return parts[0].trim();
@@ -188,6 +189,7 @@ const metaHandler = async (id, extra) => {
         const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
         const aniData = await getAniListMeta(originalTitle);
         const seriesName = extractSeriesName(originalTitle);
+        
         const title = aniData?.title?.english || aniData?.title?.romaji || originalTitle;
         const poster = aniData?.coverImage?.extraLarge || aniData?.coverImage?.large || `https://ui-avatars.com/api/?name=${encodeURIComponent(seriesName)}&background=6c5ce7&color=fff&size=300&font-size=0.3`;
         const banner = aniData?.bannerImage || `https://picsum.photos/seed/bg/${encodeURIComponent(seriesName)}/1200/600`;
@@ -216,41 +218,43 @@ const streamHandler = async (id, extra) => {
     try {
         const originalTitle = Buffer.from(id.replace('subsplease:', ''), 'base64').toString('utf-8');
         
-        // POKUS 1: Přesná shoda
-        let item = rssItems.find(i => (i.title?.[0] || "") === originalTitle);
+        // POKUS 1: Normalizovaná přesná shoda
+        // Obojí strany odstraníme mezery a normalizujeme unicode (NFC)
+        const normSearch = originalTitle.trim().normalize('NFC');
+        
+        let item = rssItems.find(i => {
+            const rssTitle = (i.title?.[0] || "").trim().normalize('NFC');
+            return rssTitle === normSearch;
+        });
 
-        // POKUS 2: Live Refresh
+        // POKUS 2: Pokud selhala, Live Refresh
         if (!item) {
-            console.log(`Hledám: ${originalTitle}`);
+            console.log(`Presná shoda selhala: ${originalTitle.substring(0, 30)}...`);
             clearInterval(updateRssCache);
             await updateRssCache();
             setInterval(updateRssCache, 5 * 60 * 1000);
 
-            item = rssItems.find(i => (i.title?.[0] || "") === originalTitle);
-            
-            // POKUS 3: Hash
-            if (!item) {
-                const hash = extractHash(originalTitle);
-                if (hash) {
-                    item = rssItems.find(i => {
-                        const t = i.title?.[0] || "";
-                        return t.includes(`[${hash}]`);
-                    });
-                }
+            // Zkusíme znovu s normalizací
+            item = rssItems.find(i => {
+                const rssTitle = (i.title?.[0] || "").trim().normalize('NFC');
+                return rssTitle === normSearch;
+            });
+        }
+        
+        // POKUS 3: Hash Search
+        if (!item) {
+            const hash = extractHash(originalTitle);
+            if (hash) {
+                console.log(`Hash search: ${hash}`);
+                item = rssItems.find(i => {
+                    const t = i.title?.[0] || "";
+                    return t.includes(`[${hash}]`);
+                });
             }
         }
         
         if (!item || !item.description?.[0]) {
-            // --- DEBUG LOGS ---
-            console.log("--- ERROR DEBUG: RSS CONTENT ---");
-            console.log("Hledaný název:", originalTitle);
-            console.log("Hash:", extractHash(originalTitle));
-            console.log("První 3 položky v RSS:");
-            for(let i=0; i<3; i++) {
-                console.log(` [${i}] Title: ${rssItems[i]?.title?.[0]}`);
-            }
-            console.log("------------------------------------");
-            throw new Error("Epizoda nenalezena (viz debug logs).");
+            throw new Error("Epizoda nenalezena (presná shoda, live refresh ani hash selhaly).");
         }
         
         const descHtml = item.description[0];
@@ -258,6 +262,8 @@ const streamHandler = async (id, extra) => {
         const magnetLink = match ? match[1] : null;
 
         if (!magnetLink) throw new Error("Magnet nenalezen.");
+        console.log(`Stream start: ${item.title[0].substring(0, 30)}...`);
+
         const rdLink = await getRdStreamLink(magnetLink, rdToken);
         return { streams: [{ title: `RD 1080p`, url: rdLink }] };
     } catch (error) {
